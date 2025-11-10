@@ -35,20 +35,12 @@ from models import (
     GetUserSavedCvsRequest,
     ExtractJobInfoRequest,
     JobInfoExtracted,
-<<<<<<< HEAD
-)
-from utils import decode_base64_pdf, extract_text_from_pdf_bytes, now_iso, make_request_id, redact_long_text, scrape_website_custom
-from agents import build_resume_parser, build_scraper, build_scorer, build_summarizer, build_orchestrator
-from firecrawl import FirecrawlApp
-=======
-    PlaywrightScrapeRequest,
     PlaywrightScrapeResponse,
     SummarizeJobRequest,
     SummarizeJobResponse,
 )
 from utils import decode_base64_pdf, extract_text_from_pdf_bytes, now_iso, make_request_id, redact_long_text, scrape_website_custom
 from agents import build_resume_parser, build_scraper, build_scorer, build_summarizer, build_orchestrator
->>>>>>> 3aeb136 (feat: update scraping workflows and optional resume handling)
 from pyngrok import ngrok, conf as ngrok_conf
 
 # Optional imports for HTML parsing
@@ -448,6 +440,7 @@ def extract_job_info_from_url(url: str, firecrawl_api_key: Optional[str] = None)
                 'job_title': None,
                 'company_name': None,
                 'portal': portal,
+                'visa_scholarship_info': "Not specified",
                 'success': False,
                 'error': 'requests and beautifulsoup4 are required for HTML parsing'
             }
@@ -467,6 +460,7 @@ def extract_job_info_from_url(url: str, firecrawl_api_key: Optional[str] = None)
                     'job_title': None,
                     'company_name': None,
                     'portal': portal,
+                    'visa_scholarship_info': "Not specified",
                     'success': False,
                     'error': f'Failed to fetch URL: {resp.status_code}'
                 }
@@ -624,9 +618,9 @@ def extract_job_info_from_url(url: str, firecrawl_api_key: Optional[str] = None)
                 for meta in meta_tags:
                     name_attr = meta.get('name', '').lower()
                     if name_attr and ('company' in name_attr or 'employer' in name_attr):
-                        content = meta.get('content', '').strip()
-                        if content and 3 <= len(content) <= 50:
-                            company = content
+                        content_meta = meta.get('content', '').strip()
+                        if content_meta and 3 <= len(content_meta) <= 50:
+                            company = content_meta
                             break
             
             # Look in content text for "at [Company]" pattern
@@ -662,11 +656,45 @@ def extract_job_info_from_url(url: str, firecrawl_api_key: Optional[str] = None)
             company = re.sub(r'^at\s+', '', company, flags=re.I)
             company = company.strip()
         
+        visa_scholarship_info: Optional[str] = None
+        visa_keywords = [
+            "visa sponsorship",
+            "visa support",
+            "scholarship",
+            "h1b",
+            "work permit",
+            "financial support",
+            "tuition assistance",
+            "visa assistance",
+        ]
+        search_sources: List[str] = []
+        if content:
+            search_sources.append(str(content))
+        try:
+            search_sources.append(soup.get_text(separator=' ', strip=True))
+        except Exception:
+            pass
+        for raw_text in search_sources:
+            lower_text = raw_text.lower()
+            if any(keyword in lower_text for keyword in visa_keywords):
+                for keyword in visa_keywords:
+                    if keyword in lower_text:
+                        idx = lower_text.find(keyword)
+                        start = max(0, idx - 100)
+                        end = min(len(raw_text), idx + len(keyword) + 200)
+                        visa_scholarship_info = raw_text[start:end].strip()
+                        break
+            if visa_scholarship_info:
+                break
+        if not visa_scholarship_info:
+            visa_scholarship_info = "Not specified"
+        
         return {
             'job_url': url,
             'job_title': title or None,
             'company_name': company or None,
             'portal': portal,
+            'visa_scholarship_info': visa_scholarship_info,
             'success': True,
             'error': None
         }
@@ -677,6 +705,7 @@ def extract_job_info_from_url(url: str, firecrawl_api_key: Optional[str] = None)
             'job_title': None,
             'company_name': None,
             'portal': detect_portal(url),
+            'visa_scholarship_info': "Not specified",
             'success': False,
             'error': str(e)
         }
@@ -1473,21 +1502,12 @@ Be honest about the fit level based on the score.
         REQUEST_PROGRESS[request_id].status = "completed"
         REQUEST_PROGRESS[request_id].updated_at = now_iso()
 
-<<<<<<< HEAD
-        # Get user_id from request
-        user_id = None
-        if data:
-            user_id = data.user_id
-        elif legacy_data:
-            user_id = legacy_data.user_id
-=======
         # Get user_id from request (already extracted earlier for new_format_jobs at line 715)
         if not user_id:
             if data:
                 user_id = data.user_id
             elif legacy_data:
                 user_id = legacy_data.user_id
->>>>>>> 3aeb136 (feat: update scraping workflows and optional resume handling)
 
         # Save job applications to Firestore if user_id is provided
         if user_id and matched_jobs:
@@ -1539,12 +1559,8 @@ Be honest about the fit level based on the score.
                             "key_matches": job.key_matches,
                             "requirements_met": job.requirements_met,
                             "total_requirements": job.total_requirements,
-<<<<<<< HEAD
-                            "scraped_summary": job.scraped_summary
-=======
                             "scraped_summary": job.scraped_summary,
-                            "visa_scholarship_info": job.visa_scholarship_info
->>>>>>> 3aeb136 (feat: update scraping workflows and optional resume handling)
+                            "visa_scholarship_info": job.visa_scholarship_info,
                         }
                         for job in matched_jobs
                     ]
@@ -1827,349 +1843,184 @@ async def extract_job_info(
     settings: Settings = Depends(get_settings)
 ):
     """
-<<<<<<< HEAD
     Extract job title, company name, portal, and description from a job posting URL.
     Uses enhanced HTML parsing with multiple extraction methods including JSON-LD,
     portal-specific selectors, AI fallback, and agent-based description generation.
-=======
-    Extract job information from a job posting URL using Firecrawl.
-    Uses the exact same pattern as SAMPLE_FIRECRAWL.PY.
->>>>>>> 3aeb136 (feat: update scraping workflows and optional resume handling)
-    
-    Request Body:
-        job_url: The job posting URL to extract information from
-        
-    Returns:
-        Extracted job information including:
-<<<<<<< HEAD
-        - job_title: The job title (if found)
-        - company_name: The company name (if found)
-        - portal: The job portal (e.g., LinkedIn, Internshala, Indeed)
-        - description: A concise job description generated by scraper and summarizer agents
-=======
-        - job_url: The job URL
-        - job_title: The job title (if found)
-        - company_name: The company name (if found)
-        - portal: The job portal (e.g., LinkedIn, Internshala, Indeed)
-        - description: The scraped content from Firecrawl
->>>>>>> 3aeb136 (feat: update scraping workflows and optional resume handling)
-        - success: Whether extraction was successful
-        - error: Error message if extraction failed
+    Also surfaces visa or scholarship information when mentioned.
     """
     try:
-<<<<<<< HEAD
-        # Set environment variables for agents
         os.environ.setdefault("OPENAI_API_KEY", settings.openai_api_key or "")
         os.environ.setdefault("FIRECRAWL_API_KEY", settings.firecrawl_api_key or "")
-        
-        # Extract job info using existing scraping functions
+
         job_info = extract_job_info_from_url(str(request.job_url), settings.firecrawl_api_key)
-        
-        # Generate description using scraper and summarizer agents
+        visa_info = job_info.get("visa_scholarship_info") or "Not specified"
+
         description = None
         if settings.openai_api_key:
             try:
                 print(f"[AGENT] Generating job description for: {request.job_url}")
-                
-                # Step 1: Use scraper agent to get full job details
                 from agents import build_scraper, build_summarizer
+
                 scraper_agent = build_scraper()
-                
-                print(f"[AGENT] [SCRAPER] Scraping job posting...")
-                scrape_prompt = f"Extract all job posting details from this URL: {request.job_url}\n\nProvide complete job description, requirements, responsibilities, and any other relevant information."
+                scrape_prompt = (
+                    f"Extract all job posting details from this URL: {request.job_url}\n\n"
+                    "Provide complete job description, requirements, responsibilities, and any other relevant information."
+                )
                 scrape_response = scraper_agent.run(scrape_prompt)
-                
-                # Extract scraped content
+
                 scraped_content = ""
-                if hasattr(scrape_response, 'content'):
+                if hasattr(scrape_response, "content"):
                     scraped_content = str(scrape_response.content)
-                elif hasattr(scrape_response, 'messages') and scrape_response.messages:
+                elif hasattr(scrape_response, "messages") and scrape_response.messages:
                     last_msg = scrape_response.messages[-1]
-                    scraped_content = str(last_msg.content if hasattr(last_msg, 'content') else last_msg)
+                    scraped_content = str(last_msg.content if hasattr(last_msg, "content") else last_msg)
                 else:
                     scraped_content = str(scrape_response)
-                
+
                 print(f"[AGENT] [SCRAPER] Scraped {len(scraped_content)} characters")
-                
-                # Step 2: Use summarizer agent to create concise description
+
                 if scraped_content:
                     summarizer_agent = build_summarizer(settings.model_name)
-                    
-                    print(f"[AGENT] [SUMMARIZER] Creating concise description...")
-                    summary_prompt = f"""Create a concise, professional job description summary (150-250 words) from this scraped job posting content.
-
-Job Title: {job_info.get('job_title', 'Not specified')}
-Company: {job_info.get('company_name', 'Not specified')}
-
-Scraped Content:
-{scraped_content[:4000]}
-
-Generate a clear, well-structured summary that includes:
-- Key responsibilities
-- Required qualifications and skills
-- Preferred experience level
-- Any notable benefits or details
-
-Keep it professional and informative, suitable for displaying to job seekers."""
-                    
+                    summary_prompt = (
+                        "Create a concise, professional job description summary (150-250 words) from this scraped job posting content.\n\n"
+                        f"Job Title: {job_info.get('job_title', 'Not specified')}\n"
+                        f"Company: {job_info.get('company_name', 'Not specified')}\n\n"
+                        "Scraped Content:\n"
+                        f"{scraped_content[:4000]}\n\n"
+                        "Generate a clear, well-structured summary that includes:\n"
+                        "- Key responsibilities\n"
+                        "- Required qualifications and skills\n"
+                        "- Preferred experience level\n"
+                        "- Any notable benefits or details\n\n"
+                        "Keep it professional and informative, suitable for displaying to job seekers."
+                    )
                     summary_response = summarizer_agent.run(summary_prompt)
-                    
-                    # Extract summary from agent response
-                    if hasattr(summary_response, 'content'):
+
+                    if hasattr(summary_response, "content"):
                         description = str(summary_response.content).strip()
-                    elif hasattr(summary_response, 'messages') and summary_response.messages:
+                    elif hasattr(summary_response, "messages") and summary_response.messages:
                         last_msg = summary_response.messages[-1]
-                        description = str(last_msg.content if hasattr(last_msg, 'content') else last_msg).strip()
+                        description = str(last_msg.content if hasattr(last_msg, "content") else last_msg).strip()
                     else:
                         description = str(summary_response).strip()
-                    
-                    # Clean up description (remove markdown code blocks if present)
-                    description = re.sub(r'^```[\w]*\n', '', description)
-                    description = re.sub(r'\n```$', '', description)
+
+                    description = re.sub(r"^```[\w]*\n", "", description)
+                    description = re.sub(r"\n```$", "", description)
                     description = description.strip()
-                    
+
                     print(f"[AGENT] [SUMMARIZER] Generated description ({len(description)} characters)")
+
+                    visa_keywords = [
+                        "visa sponsorship",
+                        "visa support",
+                        "scholarship",
+                        "h1b",
+                        "work permit",
+                        "financial support",
+                        "tuition assistance",
+                        "visa assistance",
+                    ]
+                    desc_lower = description.lower()
+                    if any(kw in desc_lower for kw in visa_keywords):
+                        for keyword in visa_keywords:
+                            if keyword in desc_lower:
+                                idx = desc_lower.find(keyword)
+                                start = max(0, idx - 100)
+                                end = min(len(description), idx + len(keyword) + 200)
+                                visa_info = description[start:end].strip()
+                                break
                 else:
-                    print(f"[AGENT] [WARNING] No scraped content received from scraper agent")
-                    
+                    print("[AGENT] [WARNING] No scraped content received from scraper agent")
+
             except Exception as agent_error:
-                # Non-fatal - continue without description
                 print(f"[AGENT] [ERROR] Failed to generate description (non-fatal): {agent_error}")
                 import traceback
+
                 print(f"[AGENT] Traceback: {traceback.format_exc()}")
-        
-        # Add description to job_info
+
         if description:
-            job_info['description'] = description
-        
-        # If title extraction failed or looks inaccurate, try AI fallback
-        if not job_info.get('job_title') or len(job_info.get('job_title', '')) < 3:
-            # Try AI extraction as fallback if OpenAI API key is available
+            job_info["description"] = description
+
+        if not job_info.get("job_title") or len(job_info.get("job_title", "")) < 3:
             if settings.openai_api_key:
                 try:
-                    # Get page content for AI analysis
                     if not requests or not BeautifulSoup:
                         return JobInfoExtracted(**job_info)
-                    
+
                     headers = {
-                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-                        'Accept-Language': 'en-US,en;q=0.9',
+                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                        "Accept-Language": "en-US,en;q=0.9",
                     }
                     resp = requests.get(str(request.job_url), headers=headers, timeout=20)
                     if resp.ok:
-                        soup = BeautifulSoup(resp.text, 'lxml')
-                        # Get main content
-                        main_content = ''
-                        main_elem = soup.find('main') or soup.find('article') or soup.find('body')
+                        soup = BeautifulSoup(resp.text, "lxml")
+                        main_content = ""
+                        main_elem = soup.find("main") or soup.find("article") or soup.find("body")
                         if main_elem:
-                            main_content = main_elem.get_text(strip=True)[:3000]  # Limit to avoid token limits
-                        
-                        # Use AI to extract job title from content
+                            main_content = main_elem.get_text(strip=True)[:3000]
+
                         os.environ.setdefault("OPENAI_API_KEY", settings.openai_api_key or "")
                         from agents import build_resume_parser
-                        
+
                         extractor_agent = build_resume_parser(settings.model_name)
-                        prompt = f"""
-Extract ONLY the job title from this job posting page content. Return ONLY the job title text, nothing else.
-
-Page content:
-{main_content[:2000]}
-
-Return ONLY the job title (e.g., "Software Engineer", "Data Scientist", "Product Manager"), no explanations, no quotes, no markdown.
-"""
+                        prompt = (
+                            "Extract ONLY the job title from this job posting page content. Return ONLY the job title text, nothing else.\n\n"
+                            f"Page content:\n{main_content[:2000]}\n\n"
+                            "Return ONLY the job title (e.g., \"Software Engineer\", \"Data Scientist\", \"Product Manager\"), no explanations, no quotes, no markdown."
+                        )
                         ai_response = extractor_agent.run(prompt)
-                        
-                        if hasattr(ai_response, 'content'):
+
+                        if hasattr(ai_response, "content"):
                             ai_title = str(ai_response.content).strip()
-                        elif hasattr(ai_response, 'messages') and ai_response.messages:
+                        elif hasattr(ai_response, "messages") and ai_response.messages:
                             last_msg = ai_response.messages[-1]
-                            ai_title = str(last_msg.content if hasattr(last_msg, 'content') else last_msg).strip()
+                            ai_title = str(last_msg.content if hasattr(last_msg, "content") else last_msg).strip()
                         else:
                             ai_title = str(ai_response).strip()
-                        
-                        # Clean AI response
-                        ai_title = re.sub(r'^["\']|["\']$', '', ai_title)  # Remove quotes
-                        ai_title = re.sub(r'^.*title[:\s]*', '', ai_title, flags=re.I)
-                        ai_title = ai_title.strip()
-                        
-                        # Validate AI extracted title
+
+                        ai_title = ai_title.strip('"\'')
+                        ai_title = re.sub(r"^.*title[:\s]*", "", ai_title, flags=re.I)
+
                         if ai_title and 3 <= len(ai_title) <= 100:
-                            # Exclude common AI errors
-                            if not any(bad in ai_title.lower() for bad in ['i cannot', 'i don\'t', 'unable to', 'sorry', 'error']):
-                                job_info['job_title'] = ai_title
-                                job_info['success'] = True
+                            if not any(bad in ai_title.lower() for bad in ["i cannot", "i don't", "unable to", "sorry", "error"]):
+                                job_info["job_title"] = ai_title
+                                job_info["success"] = True
+
+                        if main_content and (not visa_info or visa_info.lower() == "not specified"):
+                            visa_lower = main_content.lower()
+                            for keyword in [
+                                "visa sponsorship",
+                                "visa support",
+                                "scholarship",
+                                "h1b",
+                                "work permit",
+                                "financial support",
+                                "tuition assistance",
+                            ]:
+                                if keyword in visa_lower:
+                                    idx = visa_lower.find(keyword)
+                                    start = max(0, idx - 100)
+                                    end = min(len(main_content), idx + len(keyword) + 200)
+                                    visa_info = main_content[start:end].strip()
+                                    break
                 except Exception as ai_error:
-                    # Non-fatal - continue with HTML extraction result
                     print(f"AI fallback failed (non-fatal): {ai_error}")
-        
+
+        job_info["visa_scholarship_info"] = visa_info or "Not specified"
+        job_info.setdefault("success", True)
+        job_info.setdefault("error", None)
+
         return JobInfoExtracted(**job_info)
-=======
-        # Use EXACT same pattern as SAMPLE_FIRECRAWL.PY
-        from firecrawl import FirecrawlApp
-        
-        # Set environment variables (same as SAMPLE_FIRECRAWL.PY)
-        os.environ.setdefault("FIRECRAWL_API_KEY", settings.firecrawl_api_key or "")
-        
-        # Initialize Firecrawl directly (same as SAMPLE_FIRECRAWL.PY)
-        firecrawl_api_key = settings.firecrawl_api_key or os.getenv("FIRECRAWL_API_KEY")
-        firecrawl = FirecrawlApp(api_key=firecrawl_api_key)
-        
-        # Create a custom scraping function (exact same as SAMPLE_FIRECRAWL.PY)
-        def scrape_website_custom(url: str):
-            try:
-                # Try the new API method
-                result = firecrawl.scrape(url=url)
-                return result
-            except AttributeError:
-                try:
-                    # Try alternative method
-                    result = firecrawl.scrape_url(url)
-                    return result
-                except:
-                    return {"error": "Could not scrape website"}
-        
-        # Get URL from request (same as SAMPLE_FIRECRAWL.PY but from request)
-        url = str(request.job_url)
-        scraped_data = scrape_website_custom(url)
-        
-        # Initialize variables
-        job_title = None
-        company_name = None
-        description = None
-        portal = detect_portal(url)
-        
-        if "error" not in scraped_data:
-            # Use Agent without FirecrawlTools (same as SAMPLE_FIRECRAWL.PY)
-            from phi.agent import Agent
-            
-            # Set OpenAI API key for agent
-            os.environ.setdefault("OPENAI_API_KEY", settings.openai_api_key or "")
-            
-            agent = Agent(
-                show_tool_calls=True,
-                markdown=True
-            )
-            
-            # Use agent to extract information (same pattern as SAMPLE_FIRECRAWL.PY)
-            # Ask agent to extract job_title, company_name, and description from scraped data
-            extraction_prompt = f""" "Given a job URL, extract ALL available information:",
-            "- Job title (exact title from posting)",
-            "- Company name",
-            "- Complete job description",
-            "- Required skills (list each skill separately)",
-            "- Required experience (years and type)",
-            "- Qualifications and education requirements",
-            "- Responsibilities",
-            "- Salary/compensation (if mentioned)",
-            "- Location",
-            "- Job type (full-time, internship, etc.)",
-            "Return structured data with all fields clearly labeled.",
-            "If a field is not found, mark it as 'Not specified'."
-Content:
-{scraped_data}"""
-            
-            try:
-                # Use agent.print_response (same as SAMPLE_FIRECRAWL.PY)
-                agent_response = agent.run(extraction_prompt)
-                
-                # Extract response content
-                response_text = ""
-                if hasattr(agent_response, 'content'):
-                    response_text = str(agent_response.content)
-                elif hasattr(agent_response, 'messages') and agent_response.messages:
-                    last_msg = agent_response.messages[-1]
-                    response_text = str(last_msg.content if hasattr(last_msg, 'content') else last_msg)
-                else:
-                    response_text = str(agent_response)
-                
-                # Extract job_title, company_name, and description from agent response
-                import re
-                
-                # Try to extract job title
-                title_match = re.search(r'(?:Job Title|Title)[:\s]+(.+?)(?:\n|$)', response_text, re.IGNORECASE)
-                if title_match:
-                    job_title = title_match.group(1).strip()
-                
-                # Try to extract company name
-                company_match = re.search(r'(?:Company Name|Company)[:\s]+(.+?)(?:\n|$)', response_text, re.IGNORECASE)
-                if company_match:
-                    company_name = company_match.group(1).strip()
-                
-                # Extract description (everything after "Description:" or use full response)
-                desc_match = re.search(r'(?:Description|Summary)[:\s]+(.+?)(?:\n\n|\Z)', response_text, re.IGNORECASE | re.DOTALL)
-                if desc_match:
-                    description = desc_match.group(1).strip()
-                else:
-                    # Use full response as description if no specific section found
-                    description = response_text.strip()
-                
-            except Exception as agent_error:
-                # Fallback: use scraped data directly if agent fails
-                print(f"[AGENT] Error extracting info (non-fatal): {agent_error}")
-                if hasattr(scraped_data, 'content'):
-                    description = str(scraped_data.content)
-                elif isinstance(scraped_data, dict):
-                    description = str(scraped_data.get('content', scraped_data.get('markdown', scraped_data)))
-                else:
-                    description = str(scraped_data)
-        else:
-            # Error in scraping
-            description = None
-        
-        # Extract visa/scholarship info from description or scraped data
-        visa_scholarship_info = None
-        if description:
-            desc_lower = description.lower()
-            visa_keywords = ["visa sponsorship", "visa support", "scholarship", "h1b", "work permit", "financial support", "tuition assistance"]
-            if any(kw in desc_lower for kw in visa_keywords):
-                for keyword in visa_keywords:
-                    if keyword in desc_lower:
-                        idx = desc_lower.find(keyword)
-                        start = max(0, idx - 100)
-                        end = min(len(description), idx + len(keyword) + 200)
-                        visa_scholarship_info = description[start:end].strip()
-                        break
-        elif scraped_data and "error" not in scraped_data:
-            scraped_text = str(scraped_data).lower()
-            visa_keywords = ["visa sponsorship", "visa support", "scholarship", "h1b", "work permit", "financial support", "tuition assistance"]
-            if any(kw in scraped_text for kw in visa_keywords):
-                for keyword in visa_keywords:
-                    if keyword in scraped_text:
-                        idx = scraped_text.find(keyword)
-                        start = max(0, idx - 100)
-                        end = min(len(str(scraped_data)), idx + len(keyword) + 200)
-                        visa_scholarship_info = str(scraped_data)[start:end].strip()
-                        break
-        
-        if not visa_scholarship_info:
-            visa_scholarship_info = "Not specified"
-        
-        return JobInfoExtracted(
-            job_url=url,
-            job_title=job_title,
-            company_name=company_name,
-            portal=portal,
-            description=description,
-            visa_scholarship_info=visa_scholarship_info,
-            success="error" not in scraped_data,
-            error=None if "error" not in scraped_data else str(scraped_data.get("error", "Could not scrape website"))
-        )
->>>>>>> 3aeb136 (feat: update scraping workflows and optional resume handling)
-        
+
     except Exception as e:
         return JobInfoExtracted(
             job_url=str(request.job_url),
             job_title=None,
             company_name=None,
             portal=detect_portal(str(request.job_url)),
-<<<<<<< HEAD
-            success=False,
-            error=str(e)
-        )
-=======
             visa_scholarship_info="Not specified",
             success=False,
-            error=str(e)
+            error=str(e),
         )
 
 
@@ -2765,4 +2616,3 @@ async def summarize_job(
             success=False,
             error=error_msg
         )
->>>>>>> 3aeb136 (feat: update scraping workflows and optional resume handling)
