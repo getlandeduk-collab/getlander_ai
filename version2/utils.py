@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import base64
+import csv
 import io
 import os
 import time
 import hashlib
 from datetime import datetime
+from pathlib import Path
 from typing import Optional
 
 from dotenv import load_dotenv
@@ -16,6 +18,10 @@ try:
     from firecrawl import FirecrawlApp  # type: ignore
 except Exception:  # pragma: no cover - optional dependency
     FirecrawlApp = None  # type: ignore[assignment]
+
+AUTHORIZED_SPONSOR_CACHE: set[str] | None = None
+AUTHORIZED_SPONSOR_PATH = Path(__file__).resolve().parent / "2025-11-07_-_Worker_and_Temporary_Worker.csv"
+
 
 # Load environment variables to mirror SAMPLE_FIRECRAWL.py behaviour
 load_dotenv()
@@ -92,3 +98,55 @@ def scrape_website_custom(url: str, api_key: Optional[str]) -> dict:
             return {"error": f"scrape-failed: {exc}"}
     except Exception as exc:
         return {"error": f"scrape-error: {exc}"}
+
+
+def _normalize_company_name(name: str) -> str:
+    return " ".join(name.strip().lower().split())
+
+
+def _load_authorized_sponsors() -> set[str]:
+    global AUTHORIZED_SPONSOR_CACHE
+    if AUTHORIZED_SPONSOR_CACHE is not None:
+        return AUTHORIZED_SPONSOR_CACHE
+
+    sponsors: set[str] = set()
+    if not AUTHORIZED_SPONSOR_PATH.exists():
+        AUTHORIZED_SPONSOR_CACHE = sponsors
+        return sponsors
+
+    with AUTHORIZED_SPONSOR_PATH.open("r", encoding="utf-8-sig", newline="") as csvfile:
+        reader = csv.DictReader(csvfile)
+
+        header_variants = {"organisation name", "organization name", "\ufefforganisation name"}
+        for row in reader:
+            if not row:
+                continue
+            name = None
+            for key in header_variants:
+                if key in row and row[key]:
+                    name = row[key]
+                    break
+            if not name:
+                # try original casing
+                for key in list(row.keys()):
+                    if key.lower() in header_variants and row[key]:
+                        name = row[key]
+                        break
+            if not name:
+                continue
+            sponsors.add(_normalize_company_name(name))
+
+    AUTHORIZED_SPONSOR_CACHE = sponsors
+    return sponsors
+
+
+def is_authorized_sponsor(company_name: Optional[str]) -> Optional[bool]:
+    if not company_name:
+        return None
+    normalized = _normalize_company_name(company_name)
+    if not normalized:
+        return None
+    sponsors = _load_authorized_sponsors()
+    if not sponsors:
+        return None
+    return normalized in sponsors

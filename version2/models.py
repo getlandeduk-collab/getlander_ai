@@ -229,6 +229,10 @@ class PlaywrightScrapeResponse(BaseModel):
         default=None,
         description="Detected job portal (e.g., LinkedIn, Indeed, etc.)"
     )
+    is_authorized_sponsor: Optional[bool] = Field(
+        default=None,
+        description="Whether the company appears on the authorized work visa sponsor list"
+    )
     match_score: Optional[float] = Field(default=None, description="Job-candidate match score (0.0-1.0)")
     key_matches: Optional[List[str]] = Field(default=None, description="Key matching qualifications")
     requirements_met: Optional[int] = Field(default=None, description="Number of requirements met")

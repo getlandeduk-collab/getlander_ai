@@ -39,7 +39,15 @@ from models import (
     SummarizeJobRequest,
     SummarizeJobResponse,
 )
-from utils import decode_base64_pdf, extract_text_from_pdf_bytes, now_iso, make_request_id, redact_long_text, scrape_website_custom
+from utils import (
+    decode_base64_pdf,
+    extract_text_from_pdf_bytes,
+    now_iso,
+    make_request_id,
+    redact_long_text,
+    scrape_website_custom,
+    is_authorized_sponsor,
+)
 from agents import build_resume_parser, build_scraper, build_scorer, build_summarizer, build_orchestrator
 from pyngrok import ngrok, conf as ngrok_conf
 
@@ -2059,6 +2067,7 @@ async def playwright_scrape(
         - error: Error message if any
     """
     portal: Optional[str] = None
+    authorized_sponsor: Optional[bool] = None
     try:
         from playwright.sync_api import sync_playwright
         from scrapers.response import summarize_scraped_data
@@ -2297,7 +2306,30 @@ async def playwright_scrape(
         # Run Playwright scraping in thread pool
         scraped_data = await asyncio.to_thread(scrape_with_playwright, url)
         portal = scraped_data.get("portal") or detect_portal(url)
+        authorized_sponsor = is_authorized_sponsor(scraped_data.get("company_name"))
         
+        # Detect blocking pages (e.g., Cloudflare)
+        block_indicators = ["request blocked", "you have been blocked", "cloudflare"]
+        text_lower = (scraped_data.get("text_content") or "").lower()
+        if any(indicator in text_lower for indicator in block_indicators):
+            error_message = "Scraping blocked by the target site. Please try again later or use a different network."
+            print(f"[WARNING] {error_message}")
+            return PlaywrightScrapeResponse(
+                url=url,
+                scraped_data=scraped_data,
+                summarized_data={},
+                portal=portal,
+                is_authorized_sponsor=authorized_sponsor,
+                match_score=None,
+                key_matches=None,
+                requirements_met=None,
+                total_requirements=None,
+                reasoning=None,
+                visa_scholarship_info="Not specified",
+                success=False,
+                error=error_message,
+            )
+
         print(f"\n{'='*80}")
         print(f"AGENT SUMMARIZATION - Processing scraped data")
         print(f"{'='*80}")
@@ -2321,6 +2353,11 @@ async def playwright_scrape(
             experience_level=summarized_data.get("required_experience"),
             salary=summarized_data.get("salary")
         )
+        authorized_sponsor = is_authorized_sponsor(job.company)
+        if isinstance(summarized_data, dict):
+            summarized_data.setdefault("is_authorized_sponsor", authorized_sponsor)
+        if isinstance(scraped_data, dict):
+            scraped_data.setdefault("is_authorized_sponsor", authorized_sponsor)
         
         scoring_result: Optional[Dict[str, Any]] = None
         
@@ -2425,7 +2462,6 @@ Be strict with scoring:
                 load_dotenv(dotenv_path=Path(__file__).resolve().parent / ".env", override=False)
 
                 from firebase_service import get_firebase_service
-                from job_extractor import detect_portal
 
                 firebase_service = get_firebase_service()
 
@@ -2481,6 +2517,7 @@ Be strict with scoring:
                     "role": job.job_title or "",
                     "status": "Matched",
                     "visaRequired": visa_required,
+                    "authorizedSponsor": authorized_sponsor,
                 }
 
                 print(f"\n{'='*80}")
@@ -2517,6 +2554,7 @@ Be strict with scoring:
             scraped_data=scraped_data,
             summarized_data=summarized_data,
             portal=portal,
+            is_authorized_sponsor=authorized_sponsor,
             match_score=scoring_result["match_score"] if scoring_result else None,
             key_matches=scoring_result["key_matches"] if scoring_result else None,
             requirements_met=scoring_result["requirements_met"] if scoring_result else None,
@@ -2542,6 +2580,7 @@ Be strict with scoring:
             scraped_data={},
             summarized_data={},
             portal=portal,
+            is_authorized_sponsor=authorized_sponsor,
             match_score=None,
             key_matches=None,
             requirements_met=None,

@@ -2,9 +2,10 @@
 Agent-based summarization of scraped job data.
 Takes scraped_data from playwright_scraper and returns structured information.
 """
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 import os
 import re
+import json
 from phi.agent import Agent
 from phi.model.openai import OpenAIChat
 
@@ -130,21 +131,13 @@ def _parse_agent_response(response_text: str, scraped_data: Dict[str, Any]) -> D
     """
     Parse agent response to extract structured fields.
     """
-    result = {
-        "job_title": None,
-        "company_name": None,
-        "location": None,
-        "description": None,
-        "required_skills": [],
-        "required_experience": None,
-        "qualifications": None,
-        "responsibilities": None,
-        "salary": None,
-        "job_type": None,
-        "suggested_skills": [],
-        "visa_scholarship_info": None
-    }
-    
+    result = _empty_result()
+
+    # Try to parse JSON if agent responded with structured JSON
+    json_payload = _extract_json_payload(response_text)
+    if json_payload:
+        return _result_from_json(json_payload, scraped_data, result)
+
     # Use regex to extract fields from agent response
     patterns = {
         "job_title": r'(?:Job Title|Title)[:\s]+(.+?)(?:\n|$)',
@@ -267,7 +260,7 @@ def _parse_agent_response(response_text: str, scraped_data: Dict[str, Any]) -> D
         elif not result["visa_scholarship_info"]:
             result["visa_scholarship_info"] = "Not specified"
     
-    return result
+    return _finalize_result(result, scraped_data)
 
 
 def _create_fallback_response(scraped_data: Dict[str, Any]) -> Dict[str, Any]:
@@ -302,4 +295,141 @@ def _create_fallback_response(scraped_data: Dict[str, Any]) -> Dict[str, Any]:
         "suggested_skills": scraped_data.get("suggested_skills", "").split("\n") if scraped_data.get("suggested_skills") else [],
         "visa_scholarship_info": visa_scholarship_info
     }
+
+
+def _empty_result() -> Dict[str, Any]:
+    return {
+        "job_title": None,
+        "company_name": None,
+        "location": None,
+        "description": None,
+        "required_skills": [],
+        "required_experience": None,
+        "qualifications": None,
+        "responsibilities": None,
+        "salary": None,
+        "job_type": None,
+        "suggested_skills": [],
+        "visa_scholarship_info": None
+    }
+
+
+def _extract_json_payload(response_text: str) -> Optional[Dict[str, Any]]:
+    """Extract JSON payload from response text if present."""
+    text = response_text.strip()
+
+    # Remove leading/trailing backticks or code fences
+    text = re.sub(r"^```[a-zA-Z]*\s*", "", text)
+    text = re.sub(r"\s*```$", "", text)
+
+    # Look for first JSON object
+    json_match = re.search(r"\{.*\}", text, re.DOTALL)
+    if not json_match:
+        return None
+
+    json_candidate = json_match.group(0)
+
+    try:
+        return json.loads(json_candidate)
+    except json.JSONDecodeError:
+        # Try to clean up trailing commas or quotes
+        cleaned = re.sub(r",\s*([}\]])", r"\1", json_candidate)
+        try:
+            return json.loads(cleaned)
+        except json.JSONDecodeError:
+            return None
+
+
+def _result_from_json(
+    payload: Dict[str, Any],
+    scraped_data: Dict[str, Any],
+    result: Dict[str, Any]
+) -> Dict[str, Any]:
+    """Populate result from JSON payload."""
+    field_mapping = {
+        "job_title": ["job_title", "Job title", "Title"],
+        "company_name": ["company_name", "Company name", "Company"],
+        "location": ["location", "Location"],
+        "description": ["description", "Complete job description", "Job description"],
+        "required_skills": ["required_skills", "Required skills"],
+        "required_experience": ["required_experience", "Required experience", "Experience"],
+        "qualifications": ["qualifications", "Qualifications and education requirements", "Qualifications"],
+        "responsibilities": ["responsibilities", "Responsibilities"],
+        "salary": ["salary", "Salary/compensation", "Compensation"],
+        "job_type": ["job_type", "Job type", "Type"],
+        "suggested_skills": ["suggested_skills", "Suggested skills"],
+        "visa_scholarship_info": ["visa_scholarship_info", "Visa sponsorship or scholarship information"],
+    }
+
+    normalized_payload = {str(k).strip(): v for k, v in payload.items()}
+
+    for field, keys in field_mapping.items():
+        for key in keys:
+            if key in normalized_payload and normalized_payload[key] not in (None, ""):
+                value = normalized_payload[key]
+                if isinstance(value, str):
+                    value = value.strip().strip('"')
+                    if value.lower() == "not specified":
+                        value = "Not specified"
+                if field in {"required_skills", "suggested_skills"} and isinstance(value, str):
+                    value = _split_to_list(value)
+                result[field] = value
+                break
+
+    return _finalize_result(result, scraped_data)
+
+
+def _split_to_list(value: str) -> List[str]:
+    return [
+        item.strip()
+        for item in re.split(r"[\n•,\-]", value)
+        if item.strip() and item.strip().lower() != "not specified"
+    ]
+
+
+def _finalize_result(result: Dict[str, Any], scraped_data: Dict[str, Any]) -> Dict[str, Any]:
+    """Apply fallbacks and normalization before returning result."""
+    # Fallback to scraped_data if fields are missing
+    if not result["job_title"] and scraped_data.get("job_title"):
+        result["job_title"] = scraped_data["job_title"]
+
+    if not result["company_name"] and scraped_data.get("company_name"):
+        result["company_name"] = scraped_data["company_name"]
+
+    if not result["location"] and scraped_data.get("location"):
+        result["location"] = scraped_data["location"]
+
+    if not result["description"] and scraped_data.get("description"):
+        result["description"] = scraped_data["description"]
+
+    if not result["qualifications"] and scraped_data.get("qualifications"):
+        result["qualifications"] = scraped_data["qualifications"]
+
+    if not result["suggested_skills"] and scraped_data.get("suggested_skills"):
+        result["suggested_skills"] = _split_to_list(scraped_data["suggested_skills"])
+
+    if isinstance(result["required_skills"], str):
+        result["required_skills"] = _split_to_list(result["required_skills"])
+
+    if isinstance(result["suggested_skills"], str):
+        result["suggested_skills"] = _split_to_list(result["suggested_skills"])
+
+    if not result["description"]:
+        result["description"] = "Not specified"
+
+    if not result["visa_scholarship_info"]:
+        result["visa_scholarship_info"] = "Not specified"
+    else:
+        result["visa_scholarship_info"] = result["visa_scholarship_info"].strip()
+
+    if isinstance(result["company_name"], str):
+        result["company_name"] = re.sub(r'^\*+\s*|\s*\*+$', '', result["company_name"]).strip()
+        result["company_name"] = result["company_name"].replace('",', '').strip()
+        if result["company_name"].lower() == "not specified":
+            result["company_name"] = "Not specified"
+
+    if "is_authorized_sponsor" not in result or result["is_authorized_sponsor"] is None:
+        result["is_authorized_sponsor"] = scraped_data.get("is_authorized_sponsor")
+
+    return result
 
