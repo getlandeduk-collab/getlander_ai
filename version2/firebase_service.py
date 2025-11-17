@@ -508,6 +508,149 @@ class FirebaseService:
             print(f"[Firebase] [BATCH] Traceback: {traceback.format_exc()}")
             raise RuntimeError(f"Failed to save job applications batch for user {user_id}: {str(e)}")
 
+    def save_sponsorship_info(self, user_id: str, request_id: str, sponsorship_data: Dict[str, Any], job_info: Optional[Dict[str, Any]] = None) -> str:
+       
+        try:
+            print(f"\n{'='*70}")
+            print(f"[Firebase] [SPONSORSHIP] Starting save_sponsorship_info")
+            print(f"{'='*70}")
+            
+            # CRITICAL: Ensure Firebase app is initialized - EXACT same as save_job_application
+            if FirebaseService._app is None:
+                print("[Firebase] [SPONSORSHIP] [WARNING] Firebase app is None, re-initializing...")
+                self._initialize_firebase()
+            
+            # CRITICAL: Ensure Firestore client is initialized - EXACT same as save_job_application
+            print(f"[Firebase] [SPONSORSHIP] [DEBUG] Checking Firestore client...")
+            print(f"[Firebase] [SPONSORSHIP] [DEBUG] FirebaseService._db is None: {FirebaseService._db is None}")
+            
+            if FirebaseService._db is None:
+                print("[Firebase] [SPONSORSHIP] [WARNING] Firestore client is None, creating new client...")
+                FirebaseService._db = firestore.client()
+                print("[Firebase] [SPONSORSHIP] [OK] Firestore client created")
+            else:
+                print("[Firebase] [SPONSORSHIP] [OK] Using existing Firestore client")
+                try:
+                    test_ref = FirebaseService._db.collection("users")
+                    print(f"[Firebase] [SPONSORSHIP] [OK] Client is usable (type: {type(FirebaseService._db)})")
+                except Exception as test_error:
+                    print(f"[Firebase] [SPONSORSHIP] [ERROR] Client not usable: {test_error}")
+                    print("[Firebase] [SPONSORSHIP] [WARNING] Recreating client...")
+                    FirebaseService._db = firestore.client()
+                    print("[Firebase] [SPONSORSHIP] [OK] New Firestore client created")
+            
+            # Get a direct reference to the db client - EXACT same as save_job_application
+            db = FirebaseService._db
+            print(f"[Firebase] [SPONSORSHIP] [DEBUG] Using db client: {type(db)}")
+            
+            print(f"[Firebase] [SPONSORSHIP] [INFO] Saving sponsorship info for user: {user_id}")
+            
+            # Extract company info from job_info or sponsorship_data
+            company_name = job_info.get("company") if job_info else sponsorship_data.get("company_name", "")
+            portal = job_info.get("portal", "") if job_info else ""
+            job_url = job_info.get("job_url", "") if job_info else ""
+            
+            # Prepare document data with NESTED structure as specified
+            document_data = {
+                "id": request_id,  # Using request_id as the id
+                "company": {
+                    "name": company_name,
+                    "portal": portal if portal else None,
+                    "website": job_url if job_url else None,
+                },
+                "sponsorship": {
+                    "company_name": sponsorship_data.get("company_name", ""),
+                    "sponsors_workers": sponsorship_data.get("sponsors_workers", False),
+                    "visa_types": sponsorship_data.get("visa_types", ""),
+                    "summary": sponsorship_data.get("summary", ""),
+                },
+                "createdAt": datetime.now(),  # EXACT same as job_applications
+            }
+            
+            # Remove None values from company object to keep it clean
+            document_data["company"] = {k: v for k, v in document_data["company"].items() if v is not None}
+            
+            print(f"[Firebase] [SPONSORSHIP] [DEBUG] Document data prepared:")
+            print(f"  ID: {document_data['id']}")
+            print(f"  Company Name: {document_data['company'].get('name')}")
+            print(f"  Sponsors Workers: {document_data['sponsorship'].get('sponsors_workers')}")
+            print(f"  User ID: {user_id}")
+            print(f"  createdAt type: {type(document_data['createdAt'])}")
+            
+            # Helper function to serialize datetime for JSON
+            def serialize_for_json(obj):
+                if isinstance(obj, datetime):
+                    return obj.isoformat()
+                elif isinstance(obj, dict):
+                    return {k: serialize_for_json(v) for k, v in obj.items()}
+                elif isinstance(obj, list):
+                    return [serialize_for_json(item) for item in obj]
+                return obj
+            
+            print(f"[Firebase] [SPONSORSHIP] [DEBUG] Full document_data: {json.dumps(serialize_for_json(document_data), indent=2)}")
+            
+            # Ensure user document exists first (same as job_applications pattern)
+            user_ref = db.collection("users").document(user_id)
+            user_doc = user_ref.get()
+            if not user_doc.exists:
+                print(f"[Firebase] [SPONSORSHIP] [INFO] User document doesn't exist, creating it...")
+                user_ref.set({"createdAt": datetime.now(), "updatedAt": datetime.now()}, merge=True)
+                print(f"[Firebase] [SPONSORSHIP] [OK] User document created")
+            
+            # Reference to sponsorship_checks as SUBCOLLECTION under user - EXACT same pattern as job_applications
+            print(f"[Firebase] [SPONSORSHIP] [DEBUG] Creating collection reference...")
+            collection_ref = db.collection("users").document(user_id).collection("sponsorship_checks")
+            print(f"[Firebase] [SPONSORSHIP] [OK] Collection reference created: users/{user_id}/sponsorship_checks")
+            print(f"[Firebase] [SPONSORSHIP] [DEBUG] Collection ref type: {type(collection_ref)}")
+            
+            # Use add() method which returns (timestamp, document_reference) - EXACT same as job_applications
+            print(f"[Firebase] [SPONSORSHIP] [SAVE] Calling collection_ref.add(document_data)...")
+            print(f"[Firebase] [SPONSORSHIP] [DEBUG] About to save document...")
+            
+            result = collection_ref.add(document_data)
+            
+            print(f"[Firebase] [SPONSORSHIP] [DEBUG] add() returned: {result}")
+            print(f"[Firebase] [SPONSORSHIP] [DEBUG] Result type: {type(result)}")
+            
+            # Handle return value - EXACT same logic as save_job_application
+            if isinstance(result, tuple):
+                update_time, doc_ref = result
+                doc_id = doc_ref.id
+                print(f"[Firebase] [SPONSORSHIP] [DEBUG] Result is tuple: update_time={update_time}, doc_ref.id={doc_id}")
+            else:
+                doc_ref = result
+                doc_id = doc_ref.id if hasattr(doc_ref, 'id') else str(doc_ref)
+                print(f"[Firebase] [SPONSORSHIP] [DEBUG] Result is single object: doc_id={doc_id}")
+            
+            print(f"[Firebase] [SPONSORSHIP] [SUCCESS] Document added with ID: {doc_id}")
+            print(f"[Firebase] [SPONSORSHIP] [PATH] users/{user_id}/sponsorship_checks/{doc_id}")
+            
+            # Verify the document was saved - EXACT same as save_job_application
+            print(f"[Firebase] [SPONSORSHIP] [VERIFY] Verifying document was saved...")
+            doc = collection_ref.document(doc_id).get()
+            
+            if doc.exists:
+                print(f"[Firebase] [SPONSORSHIP] [OK] Verification successful! Document exists.")
+                doc_dict = doc.to_dict()
+                print(f"[Firebase] [SPONSORSHIP] [DEBUG] Document contents:")
+                for key, value in doc_dict.items():
+                    print(f"  {key}: {value} (type: {type(value)})")
+            else:
+                print(f"[Firebase] [SPONSORSHIP] [WARNING] Document not found after saving")
+                print(f"[Firebase] [SPONSORSHIP] [ERROR] This indicates the save operation failed silently!")
+            
+            print(f"{'='*70}\n")
+            return doc_id
+                
+        except Exception as e:
+            import traceback
+            error_msg = f"Failed to save sponsorship info for user {user_id}: {str(e)}"
+            print(f"[Firebase] [SPONSORSHIP] [ERROR] {error_msg}")
+            print(f"[Firebase] [SPONSORSHIP] [TRACEBACK]:")
+            print(traceback.format_exc())
+            print(f"{'='*70}\n")
+            raise RuntimeError(error_msg)
+
 
 # Singleton instance
 _firebase_service: Optional[FirebaseService] = None

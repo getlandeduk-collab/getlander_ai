@@ -51,6 +51,18 @@ def summarize_scraped_data(
     # Prepare the content to analyze
     content_to_analyze = ""
     if isinstance(scraped_data, dict):
+        # Log what we received for debugging
+        print("\n" + "="*80)
+        print("📋 SUMMARIZER - Received Data Structure")
+        print("="*80)
+        print(f"Job Title: {scraped_data.get('job_title', 'Not provided')}")
+        print(f"Company Name (pre-extracted): {scraped_data.get('company_name', 'Not provided')}")
+        print(f"Location: {scraped_data.get('location', 'Not provided')}")
+        print(f"Description length: {len(str(scraped_data.get('description', '')))} chars")
+        print(f"Text content length: {len(str(scraped_data.get('text_content', '')))} chars")
+        print(f"Description preview (first 200 chars): {str(scraped_data.get('description', ''))[:200]}...")
+        print("="*80 + "\n")
+        
         # Combine all relevant fields
         content_parts = []
         
@@ -78,6 +90,7 @@ def summarize_scraped_data(
         content_to_analyze = "\n\n".join(content_parts) if content_parts else str(scraped_data)
     else:
         content_to_analyze = str(scraped_data)
+        print(f"[SUMMARIZER] Received non-dict data: {type(scraped_data)}")
     
     # Create extraction prompt (same structure as app.py lines 1728-1742)
     extraction_prompt = f"""Given the following scraped job posting data, extract ALL available information and return it in a structured format.

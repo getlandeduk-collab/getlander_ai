@@ -98,12 +98,21 @@ class MatchedJob(BaseModel):
     )
 
 
+class SponsorshipInfo(BaseModel):
+    """Sponsorship information for a company."""
+    company_name: Optional[str] = None
+    sponsors_workers: bool = False
+    visa_types: Optional[str] = None
+    summary: str = "No sponsorship information available"
+
+
 class MatchJobsResponse(BaseModel):
     candidate_profile: CandidateProfile
     matched_jobs: List[MatchedJob]
     processing_time: str
     jobs_analyzed: int
     request_id: str
+    sponsorship: Optional[SponsorshipInfo] = None
 
 
 class ProgressStatus(BaseModel):

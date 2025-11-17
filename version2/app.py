@@ -38,6 +38,7 @@ from models import (
     PlaywrightScrapeResponse,
     SummarizeJobRequest,
     SummarizeJobResponse,
+    SponsorshipInfo,
 )
 from utils import (
     decode_base64_pdf,
@@ -971,11 +972,61 @@ Extract every skill, tool, and technology mentioned. Calculate total years from 
                 openai_key
             )
             
+            # Extract company name with fallback logic
+            extracted_company = summarized_data.get("company_name")
+            
+            # Clean extracted company name if it exists
+            if extracted_company:
+                import re
+                # Remove patterns like "Name**:", "Company:", "Employer:", etc.
+                extracted_company = re.sub(r'^(Name\*{0,2}:?\s*|Company:?\s*|Employer:?\s*)', '', extracted_company, flags=re.IGNORECASE)
+                extracted_company = extracted_company.strip()
+                # Remove any asterisks or special characters at the start
+                extracted_company = re.sub(r'^[\*\*\s]+', '', extracted_company)
+                extracted_company = extracted_company.strip()
+            
+            # Fallback 1: Try to extract from job title if company not found
+            if not extracted_company or extracted_company.lower() in ["unknown", "not specified", "none", ""]:
+                # Try to extract company from job title (e.g., "Johnsons Volkswagen Liverpool Service Advisor")
+                # Pattern: Company name usually appears before location or job title keywords
+                title_parts = job_title.split(" - ")[0]  # Remove " - job post" suffix
+                # Look for company patterns: "Company Name Location Job Title"
+                # Common patterns: "Company Location", "Company Job Title"
+                import re
+                # Try to find company name before common location keywords
+                location_keywords = ["liverpool", "london", "manchester", "birmingham", "leeds", "glasgow", "edinburgh", "bristol", "cardiff"]
+                for loc in location_keywords:
+                    if loc.lower() in title_parts.lower():
+                        # Extract text before location
+                        parts = re.split(f"\\b{loc}\\b", title_parts, flags=re.IGNORECASE)
+                        if len(parts) > 0 and parts[0].strip():
+                            potential_company = parts[0].strip()
+                            # Clean up common prefixes/suffixes
+                            potential_company = re.sub(r'^(at|for|with)\s+', '', potential_company, flags=re.IGNORECASE)
+                            if len(potential_company) >= 3 and len(potential_company) <= 50:
+                                extracted_company = potential_company
+                                print(f"[Company Extraction] Extracted from title: {extracted_company}")
+                                break
+                
+                # Fallback 2: If still not found, try extracting from job_data using sponsorship_checker
+                if not extracted_company or extracted_company.lower() in ["unknown", "not specified", "none", ""]:
+                    try:
+                        from sponsorship_checker import extract_company_name
+                        extracted_company = extract_company_name(job_data)
+                        if extracted_company:
+                            print(f"[Company Extraction] Extracted from job data: {extracted_company}")
+                    except Exception as e:
+                        print(f"[Company Extraction] Error extracting from job data: {e}")
+            
+            # Final fallback
+            if not extracted_company or extracted_company.lower() in ["unknown", "not specified", "none", ""]:
+                extracted_company = "Unknown Company"
+            
             # Create JobPosting from summarized data
             job = JobPosting(
                 url=job_link if job_link else "https://example.com",
                 job_title=summarized_data.get("job_title") or job_title,
-                company=summarized_data.get("company_name") or "Unknown Company",
+                company=extracted_company,
                 description=summarized_data.get("description") or job_data,
                 skills_needed=summarized_data.get("required_skills", []) or [],
                 experience_level=summarized_data.get("required_experience"),
@@ -1600,12 +1651,129 @@ Be honest about the fit level based on the score.
                 print(traceback.format_exc())
                 print("\n[INFO] Note: The API response will still be returned, but applications were not saved to Firestore.")
 
+        # STEP 6: Check Sponsorship
+        print("\n" + "="*80)
+        print("🔍 SPONSORSHIP CHECKER - Checking company sponsorship status")
+        print("="*80)
+        
+        sponsorship_info = None
+        if matched_jobs:
+            # Get company name from the top matched job
+            top_job = matched_jobs[0]
+            company_name = top_job.company
+            
+            # Clean company name - remove common prefixes/suffixes that might have been added
+            if company_name:
+                import re
+                # Remove patterns like "Name**:", "Company:", "Employer:", etc.
+                company_name = re.sub(r'^(Name\*{0,2}:?\s*|Company:?\s*|Employer:?\s*)', '', company_name, flags=re.IGNORECASE)
+                # Remove any leading/trailing whitespace
+                company_name = company_name.strip()
+                # Remove any asterisks or special characters at the start
+                company_name = re.sub(r'^[\*\*\s]+', '', company_name)
+                company_name = company_name.strip()
+            
+            # Get job content for extraction if needed
+            # Try from scraped_summary first, then from summary, then from cache
+            job_content = top_job.scraped_summary or top_job.summary or ""
+            if not job_content and top_job.job_url:
+                cached_data = SCRAPE_CACHE.get(str(top_job.job_url), {})
+                job_content = cached_data.get('description') or cached_data.get('scraped_summary') or cached_data.get('text_content') or ""
+            
+            try:
+                from sponsorship_checker import check_sponsorship
+                
+                print(f"[Sponsorship] Checking company: {company_name}")
+                sponsorship_result = check_sponsorship(company_name, job_content)
+                
+                sponsorship_info = SponsorshipInfo(
+                    company_name=sponsorship_result.get('company_name'),
+                    sponsors_workers=sponsorship_result.get('sponsors_workers', False),
+                    visa_types=sponsorship_result.get('visa_types'),
+                    summary=sponsorship_result.get('summary', 'No sponsorship information available')
+                )
+                
+                print(f"[Sponsorship] Result: {'✓ Sponsors workers' if sponsorship_info.sponsors_workers else '✗ Does not sponsor workers'}")
+                if sponsorship_info.visa_types:
+                    print(f"[Sponsorship] Visa types: {sponsorship_info.visa_types}")
+                
+                # Save sponsorship info to Firestore as a separate document
+                try:
+                    # Get user_id (same logic as used for saving job applications at line 1554-1559)
+                    # user_id is already extracted earlier in the function
+                    sponsorship_user_id = user_id if 'user_id' in locals() and user_id else None
+                    if not sponsorship_user_id:
+                        if 'data' in locals() and data:
+                            sponsorship_user_id = getattr(data, 'user_id', None)
+                        if not sponsorship_user_id and 'legacy_data' in locals() and legacy_data:
+                            sponsorship_user_id = getattr(legacy_data, 'user_id', None)
+                    
+                    if sponsorship_user_id:
+                        from firebase_service import get_firebase_service
+                        firebase_service = get_firebase_service()
+                        
+                        # Prepare sponsorship data dictionary
+                        sponsorship_dict = {
+                            "company_name": sponsorship_result.get('company_name'),
+                            "sponsors_workers": sponsorship_result.get('sponsors_workers', False),
+                            "visa_types": sponsorship_result.get('visa_types'),
+                            "summary": sponsorship_result.get('summary', '')
+                        }
+                        
+                        # Prepare job info (same structure as used for job_applications)
+                        job_info = None
+                        if matched_jobs and len(matched_jobs) > 0:
+                            top_job = matched_jobs[0]
+                            # Extract portal from job_url if available
+                            portal = "Unknown"
+                            job_url_str = str(top_job.job_url) if top_job.job_url else ""
+                            if "linkedin.com" in job_url_str.lower():
+                                portal = "LinkedIn"
+                            elif "indeed.com" in job_url_str.lower():
+                                portal = "Indeed"
+                            elif "glassdoor.com" in job_url_str.lower():
+                                portal = "Glassdoor"
+                            
+                            job_info = {
+                                "job_title": top_job.job_title,
+                                "job_url": job_url_str,
+                                "company": top_job.company,
+                                "portal": portal
+                            }
+                        
+                        # Save to Firestore
+                        doc_id = firebase_service.save_sponsorship_info(
+                            user_id=sponsorship_user_id,
+                            request_id=request_id,
+                            sponsorship_data=sponsorship_dict,
+                            job_info=job_info
+                        )
+                        print(f"[Sponsorship] ✓ Saved sponsorship info to Firestore: {doc_id}")
+                    else:
+                        print("[Sponsorship] ⚠️  User ID not found, skipping Firestore save")
+                        
+                except ImportError as e:
+                    print(f"[Sponsorship] Warning: Firebase service not available: {e}")
+                except Exception as e:
+                    print(f"[Sponsorship] Warning: Failed to save sponsorship info to Firestore (non-fatal): {e}")
+                    import traceback
+                    print(traceback.format_exc())
+                    
+            except ImportError as e:
+                print(f"[Sponsorship] Warning: Sponsorship checker not available: {e}")
+                print("[Sponsorship] Install pandas and fuzzywuzzy: pip install pandas fuzzywuzzy python-Levenshtein")
+            except Exception as e:
+                print(f"[Sponsorship] Error checking sponsorship: {e}")
+                import traceback
+                print(traceback.format_exc())
+
         response = MatchJobsResponse(
             candidate_profile=candidate_profile,
             matched_jobs=matched_jobs,
             processing_time="",
             jobs_analyzed=len(jobs),  # Use len(jobs) instead of len(urls) for accuracy
             request_id=request_id,
+            sponsorship=sponsorship_info,
         )
         return response
         

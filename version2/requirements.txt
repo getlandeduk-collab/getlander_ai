@@ -28,3 +28,8 @@ pyngrok==7.2.3
 # Firebase
 firebase-admin==6.6.0
 pytz==2024.1
+
+# Sponsorship matching
+pandas>=2.0.0
+fuzzywuzzy>=0.18.0
+python-Levenshtein>=0.21.0
