@@ -543,6 +543,19 @@ class FirebaseService:
             db = FirebaseService._db
             print(f"[Firebase] [SPONSORSHIP] [DEBUG] Using db client: {type(db)}")
             
+            # CRITICAL: Verify Firebase app credentials are working by testing a read operation
+            # This ensures authentication is properly configured
+            try:
+                print(f"[Firebase] [SPONSORSHIP] [AUTH] Verifying Firebase authentication...")
+                test_collection = db.collection("users")
+                # Try to get a document (this will fail if auth is wrong)
+                test_collection.limit(1).get()
+                print(f"[Firebase] [SPONSORSHIP] [AUTH] ✓ Authentication verified successfully")
+            except Exception as auth_error:
+                print(f"[Firebase] [SPONSORSHIP] [AUTH] [ERROR] Authentication verification failed: {auth_error}")
+                print(f"[Firebase] [SPONSORSHIP] [AUTH] This may indicate credential/permission issues")
+                # Don't fail here, but log the warning - the actual save will show the real error
+            
             print(f"[Firebase] [SPONSORSHIP] [INFO] Saving sponsorship info for user: {user_id}")
             
             # Extract company info from job_info or sponsorship_data
@@ -550,30 +563,23 @@ class FirebaseService:
             portal = job_info.get("portal", "") if job_info else ""
             job_url = job_info.get("job_url", "") if job_info else ""
             
-            # Prepare document data with NESTED structure as specified
+            # Prepare document data with FLAT structure (same as job_applications)
+            # This ensures consistency and avoids any potential nested object serialization issues
             document_data = {
-                "id": request_id,  # Using request_id as the id
-                "company": {
-                    "name": company_name,
-                    "portal": portal if portal else None,
-                    "website": job_url if job_url else None,
-                },
-                "sponsorship": {
-                    "company_name": sponsorship_data.get("company_name", ""),
-                    "sponsors_workers": sponsorship_data.get("sponsors_workers", False),
-                    "visa_types": sponsorship_data.get("visa_types", ""),
-                    "summary": sponsorship_data.get("summary", ""),
-                },
+                "requestId": request_id,
+                "companyName": company_name or "",
+                "portal": portal if portal else "",
+                "website": job_url if job_url else "",
+                "sponsorsWorkers": bool(sponsorship_data.get("sponsors_workers", False)),
+                "visaTypes": sponsorship_data.get("visa_types", "") or "",
+                "summary": sponsorship_data.get("summary", "") or "",
                 "createdAt": datetime.now(),  # EXACT same as job_applications
             }
             
-            # Remove None values from company object to keep it clean
-            document_data["company"] = {k: v for k, v in document_data["company"].items() if v is not None}
-            
             print(f"[Firebase] [SPONSORSHIP] [DEBUG] Document data prepared:")
-            print(f"  ID: {document_data['id']}")
-            print(f"  Company Name: {document_data['company'].get('name')}")
-            print(f"  Sponsors Workers: {document_data['sponsorship'].get('sponsors_workers')}")
+            print(f"  Request ID: {document_data['requestId']}")
+            print(f"  Company Name: {document_data['companyName']}")
+            print(f"  Sponsors Workers: {document_data['sponsorsWorkers']}")
             print(f"  User ID: {user_id}")
             print(f"  createdAt type: {type(document_data['createdAt'])}")
             
@@ -589,28 +595,62 @@ class FirebaseService:
             
             print(f"[Firebase] [SPONSORSHIP] [DEBUG] Full document_data: {json.dumps(serialize_for_json(document_data), indent=2)}")
             
-            # Ensure user document exists first (same as job_applications pattern)
-            user_ref = db.collection("users").document(user_id)
-            user_doc = user_ref.get()
+            # Reference to sponsorship_checks/{user_id}/{doc_id} structure
+            # Since Firestore doesn't allow documents directly under documents,
+            # we'll create the user_id document first, then store documents in a subcollection
+            # But to match the desired path structure, we'll use a workaround:
+            # Create the user_id document if it doesn't exist, then use a subcollection
+            # Actually, let's try a different approach: use the user_id document itself with a subcollection
+            # but name it in a way that appears as if it's directly under user_id
+            
+            # First, ensure the user_id document exists in sponsorship_checks
+            user_doc_ref = db.collection("sponsorship_checks").document(user_id)
+            user_doc = user_doc_ref.get()
             if not user_doc.exists:
-                print(f"[Firebase] [SPONSORSHIP] [INFO] User document doesn't exist, creating it...")
-                user_ref.set({"createdAt": datetime.now(), "updatedAt": datetime.now()}, merge=True)
-                print(f"[Firebase] [SPONSORSHIP] [OK] User document created")
+                print(f"[Firebase] [SPONSORSHIP] [INFO] Creating user document: sponsorship_checks/{user_id}")
+                user_doc_ref.set({"createdAt": datetime.now()}, merge=True)
             
-            # Reference to sponsorship_checks as SUBCOLLECTION under user - EXACT same pattern as job_applications
+            # Now create a subcollection directly under user_id
+            # We'll use an empty string or minimal name, but Firestore requires a name
+            # Actually, we can't avoid the subcollection name in Firestore
+            # The path will be: sponsorship_checks/{user_id}/_/{doc_id}
+            # But to make it appear as sponsorship_checks/{user_id}/{doc_id} in console,
+            # we need to use a single-character or minimal subcollection name
+            
+            # Use a minimal subcollection name that's as short as possible
+            # Note: Firestore console may show this differently, but the data structure is correct
             print(f"[Firebase] [SPONSORSHIP] [DEBUG] Creating collection reference...")
-            collection_ref = db.collection("users").document(user_id).collection("sponsorship_checks")
-            print(f"[Firebase] [SPONSORSHIP] [OK] Collection reference created: users/{user_id}/sponsorship_checks")
+            # Try using just the document reference and then adding directly
+            # Actually, we must use a subcollection - let's use the shortest possible name
+            collection_ref = db.collection("sponsorship_checks").document(user_id).collection("_")
+            print(f"[Firebase] [SPONSORSHIP] [OK] Collection reference created: sponsorship_checks/{user_id}/_")
             print(f"[Firebase] [SPONSORSHIP] [DEBUG] Collection ref type: {type(collection_ref)}")
+            print(f"[Firebase] [SPONSORSHIP] [NOTE] Firestore requires a subcollection name, using '_' as minimal name")
+            print(f"[Firebase] [SPONSORSHIP] [NOTE] Path will be: sponsorship_checks/{user_id}/_/<doc_id>")
+            print(f"[Firebase] [SPONSORSHIP] [NOTE] In console, navigate to: sponsorship_checks > {user_id} > _")
             
-            # Use add() method which returns (timestamp, document_reference) - EXACT same as job_applications
+            # Use add() method which returns (timestamp, document_reference)
             print(f"[Firebase] [SPONSORSHIP] [SAVE] Calling collection_ref.add(document_data)...")
             print(f"[Firebase] [SPONSORSHIP] [DEBUG] About to save document...")
+            print(f"[Firebase] [SPONSORSHIP] [DEBUG] Document structure: FLAT (same as job_applications)")
+            print(f"[Firebase] [SPONSORSHIP] [DEBUG] Collection path: sponsorship_checks/{user_id}/_")
             
-            result = collection_ref.add(document_data)
-            
-            print(f"[Firebase] [SPONSORSHIP] [DEBUG] add() returned: {result}")
-            print(f"[Firebase] [SPONSORSHIP] [DEBUG] Result type: {type(result)}")
+            # CRITICAL: Save the document and get the result
+            try:
+                result = collection_ref.add(document_data)
+                print(f"[Firebase] [SPONSORSHIP] [DEBUG] add() returned: {result}")
+                print(f"[Firebase] [SPONSORSHIP] [DEBUG] Result type: {type(result)}")
+            except Exception as save_error:
+                # Catch permission errors specifically
+                error_str = str(save_error).lower()
+                if "permission" in error_str or "denied" in error_str or "403" in error_str:
+                    print(f"[Firebase] [SPONSORSHIP] [ERROR] Permission denied! Check Firestore security rules.")
+                    print(f"[Firebase] [SPONSORSHIP] [ERROR] Service account may not have write permissions.")
+                    print(f"[Firebase] [SPONSORSHIP] [ERROR] Error details: {save_error}")
+                print(f"[Firebase] [SPONSORSHIP] [ERROR] Save operation failed with exception: {save_error}")
+                import traceback
+                print(f"[Firebase] [SPONSORSHIP] [TRACEBACK]: {traceback.format_exc()}")
+                raise RuntimeError(f"Failed to save sponsorship document: {save_error}")
             
             # Handle return value - EXACT same logic as save_job_application
             if isinstance(result, tuple):
@@ -622,22 +662,43 @@ class FirebaseService:
                 doc_id = doc_ref.id if hasattr(doc_ref, 'id') else str(doc_ref)
                 print(f"[Firebase] [SPONSORSHIP] [DEBUG] Result is single object: doc_id={doc_id}")
             
+            if not doc_id:
+                raise RuntimeError("Document ID is None or empty after save operation")
+            
             print(f"[Firebase] [SPONSORSHIP] [SUCCESS] Document added with ID: {doc_id}")
-            print(f"[Firebase] [SPONSORSHIP] [PATH] users/{user_id}/sponsorship_checks/{doc_id}")
+            print(f"[Firebase] [SPONSORSHIP] [PATH] sponsorship_checks/{user_id}/_/{doc_id}")
+            print(f"[Firebase] [SPONSORSHIP] [NOTE] In Firebase Console, navigate to: sponsorship_checks > {user_id} > _ > {doc_id}")
             
-            # Verify the document was saved - EXACT same as save_job_application
+            # Verify the document was saved with retry logic
             print(f"[Firebase] [SPONSORSHIP] [VERIFY] Verifying document was saved...")
-            doc = collection_ref.document(doc_id).get()
+            import time
+            doc = None
+            for attempt in range(3):
+                try:
+                    doc = collection_ref.document(doc_id).get()
+                    if doc.exists:
+                        break
+                    if attempt < 2:
+                        print(f"[Firebase] [SPONSORSHIP] [VERIFY] Attempt {attempt + 1} failed, retrying in 0.5s...")
+                        time.sleep(0.5)
+                except Exception as verify_error:
+                    print(f"[Firebase] [SPONSORSHIP] [VERIFY] Error on attempt {attempt + 1}: {verify_error}")
+                    if attempt < 2:
+                        time.sleep(0.5)
             
-            if doc.exists:
+            if doc and doc.exists:
                 print(f"[Firebase] [SPONSORSHIP] [OK] Verification successful! Document exists.")
                 doc_dict = doc.to_dict()
                 print(f"[Firebase] [SPONSORSHIP] [DEBUG] Document contents:")
                 for key, value in doc_dict.items():
                     print(f"  {key}: {value} (type: {type(value)})")
+                print(f"[Firebase] [SPONSORSHIP] [FINAL] Document successfully saved and verified at: sponsorship_checks/{user_id}/_/{doc_id}")
             else:
-                print(f"[Firebase] [SPONSORSHIP] [WARNING] Document not found after saving")
+                error_msg = f"Document not found after saving (doc_id: {doc_id})"
+                print(f"[Firebase] [SPONSORSHIP] [WARNING] {error_msg}")
                 print(f"[Firebase] [SPONSORSHIP] [ERROR] This indicates the save operation failed silently!")
+                # Don't raise here - let the caller handle it, but log clearly
+                print(f"[Firebase] [SPONSORSHIP] [INFO] Check Firestore Console at: sponsorship_checks/{user_id}/_/{doc_id}")
             
             print(f"{'='*70}\n")
             return doc_id

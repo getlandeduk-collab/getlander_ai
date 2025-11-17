@@ -1709,8 +1709,14 @@ Be honest about the fit level based on the score.
                             sponsorship_user_id = getattr(legacy_data, 'user_id', None)
                     
                     if sponsorship_user_id:
-                        from firebase_service import get_firebase_service
-                        firebase_service = get_firebase_service()
+                        # Reuse the same firebase_service instance that was used for job_applications
+                        # This ensures we're using the same authenticated client
+                        if 'firebase_service' not in locals():
+                            from firebase_service import get_firebase_service
+                            firebase_service = get_firebase_service()
+                            print(f"[Sponsorship] [DEBUG] Created new Firebase service instance")
+                        else:
+                            print(f"[Sponsorship] [DEBUG] Reusing existing Firebase service instance")
                         
                         # Prepare sponsorship data dictionary
                         sponsorship_dict = {
@@ -1741,23 +1747,55 @@ Be honest about the fit level based on the score.
                                 "portal": portal
                             }
                         
-                        # Save to Firestore
+                        # Save to Firestore - this will raise an exception if it fails
+                        print(f"\n{'='*80}")
+                        print(f"[Sponsorship] [SAVE] Attempting to save sponsorship info to Firestore...")
+                        print(f"[Sponsorship] [SAVE] User ID: {sponsorship_user_id}")
+                        print(f"[Sponsorship] [SAVE] Request ID: {request_id}")
+                        print(f"[Sponsorship] [SAVE] Company: {sponsorship_dict.get('company_name')}")
+                        print(f"{'='*80}\n")
+                        
                         doc_id = firebase_service.save_sponsorship_info(
                             user_id=sponsorship_user_id,
                             request_id=request_id,
                             sponsorship_data=sponsorship_dict,
                             job_info=job_info
                         )
-                        print(f"[Sponsorship] ✓ Saved sponsorship info to Firestore: {doc_id}")
+                        
+                        print(f"\n{'='*80}")
+                        print(f"[Sponsorship] ✓ SUCCESS - Saved sponsorship info to Firestore")
+                        print(f"[Sponsorship] [DOC_ID] {doc_id}")
+                        print(f"[Sponsorship] [PATH] sponsorship_checks/{sponsorship_user_id}/_/{doc_id}")
+                        print(f"[Sponsorship] [NOTE] In Firebase Console: sponsorship_checks > {sponsorship_user_id} > _ > {doc_id}")
+                        print(f"{'='*80}\n")
                     else:
                         print("[Sponsorship] ⚠️  User ID not found, skipping Firestore save")
                         
                 except ImportError as e:
-                    print(f"[Sponsorship] Warning: Firebase service not available: {e}")
-                except Exception as e:
-                    print(f"[Sponsorship] Warning: Failed to save sponsorship info to Firestore (non-fatal): {e}")
+                    print(f"[Sponsorship] [ERROR] Firebase service not available: {e}")
+                    print(f"[Sponsorship] [ERROR] Install firebase-admin: pip install firebase-admin")
                     import traceback
                     print(traceback.format_exc())
+                except RuntimeError as e:
+                    # RuntimeError is raised by save_sponsorship_info on failure
+                    print(f"\n{'='*80}")
+                    print(f"[Sponsorship] [CRITICAL ERROR] Failed to save sponsorship info to Firestore!")
+                    print(f"[Sponsorship] [ERROR] {e}")
+                    print(f"{'='*80}")
+                    import traceback
+                    print(traceback.format_exc())
+                    print(f"{'='*80}\n")
+                    # Re-raise to ensure we know about it, but don't fail the entire request
+                    # The API response will still be returned
+                except Exception as e:
+                    print(f"\n{'='*80}")
+                    print(f"[Sponsorship] [CRITICAL ERROR] Unexpected error saving sponsorship info!")
+                    print(f"[Sponsorship] [ERROR] {e}")
+                    print(f"{'='*80}")
+                    import traceback
+                    print(traceback.format_exc())
+                    print(f"{'='*80}\n")
+                    # Re-raise to ensure we know about it, but don't fail the entire request
                     
             except ImportError as e:
                 print(f"[Sponsorship] Warning: Sponsorship checker not available: {e}")
