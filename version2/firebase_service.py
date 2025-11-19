@@ -342,17 +342,64 @@ class FirebaseService:
         except Exception as e:
             raise RuntimeError(f"Failed to fetch savedCVs for user {user_id}: {str(e)}")
 
-    def save_job_application(self, user_id: str, job_data: Dict[str, Any]) -> str:
+    def _check_job_application_duplicate(self, user_id: str, job_data: Dict[str, Any]) -> Optional[str]:
         """
-        Save a job application to Firestore.
-        Uses the EXACT same approach as test_firebase_simple.py
+        Check if a job application already exists for this user.
         
         Args:
             user_id: The user ID
             job_data: Dictionary containing job application data
             
         Returns:
-            The document ID of the saved application
+            Document ID of existing duplicate if found, None otherwise
+        """
+        try:
+            db = FirebaseService._db
+            if db is None:
+                return None
+            
+            collection_ref = db.collection("users").document(user_id).collection("job_applications")
+            
+            # Extract fields to check for duplicates
+            job_link = job_data.get("link", "").strip()
+            company = job_data.get("company", "").strip()
+            role = job_data.get("role", "").strip()
+            
+            # Strategy 1: Check by job URL (most reliable)
+            if job_link:
+                query = collection_ref.where("link", "==", job_link).limit(1)
+                docs = query.stream()
+                for doc in docs:
+                    print(f"[Firebase] [DUPLICATE] Found duplicate job application by URL: {doc.id}")
+                    return doc.id
+            
+            # Strategy 2: Check by company + role (fallback if no URL)
+            if company and role:
+                query = collection_ref.where("company", "==", company).where("role", "==", role).limit(1)
+                docs = query.stream()
+                for doc in docs:
+                    print(f"[Firebase] [DUPLICATE] Found duplicate job application by company+role: {doc.id}")
+                    return doc.id
+            
+            return None
+            
+        except Exception as e:
+            print(f"[Firebase] [DUPLICATE] Error checking for duplicate: {e}")
+            # Don't fail on duplicate check errors, just log and continue
+            return None
+    
+    def save_job_application(self, user_id: str, job_data: Dict[str, Any]) -> str:
+        """
+        Save a job application to Firestore.
+        Uses the EXACT same approach as test_firebase_simple.py
+        Checks for duplicates before saving.
+        
+        Args:
+            user_id: The user ID
+            job_data: Dictionary containing job application data
+            
+        Returns:
+            The document ID of the saved application (or existing duplicate)
         """
         try:
             print(f"\n{'='*70}")
@@ -389,6 +436,16 @@ class FirebaseService:
             db = FirebaseService._db
             print(f"[Firebase] [DEBUG] Using db client: {type(db)}")
             
+            # Check for duplicates before saving
+            print(f"[Firebase] [DUPLICATE] Checking for duplicate job application...")
+            existing_doc_id = self._check_job_application_duplicate(user_id, job_data)
+            if existing_doc_id:
+                print(f"[Firebase] [DUPLICATE] ✓ Duplicate found, skipping save. Existing document ID: {existing_doc_id}")
+                print(f"[Firebase] [DUPLICATE] Path: users/{user_id}/job_applications/{existing_doc_id}")
+                print(f"{'='*70}\n")
+                return existing_doc_id
+            
+            print(f"[Firebase] [DUPLICATE] No duplicate found, proceeding with save...")
             print(f"[Firebase] [INFO] Saving job application for user: {user_id}")
             
             # Prepare document data with defaults
@@ -474,24 +531,35 @@ class FirebaseService:
     def save_job_applications_batch(self, user_id: str, jobs_data: List[Dict[str, Any]]) -> List[str]:
         """
         Save multiple job applications to Firestore in a batch.
+        Duplicates are automatically skipped (existing document IDs are returned).
         
         Args:
             user_id: The user ID
             jobs_data: List of dictionaries containing job application data
             
         Returns:
-            List of document IDs of saved applications
+            List of document IDs of saved applications (includes existing duplicates)
         """
         try:
             print(f"[Firebase] [BATCH] Starting batch save for {len(jobs_data)} job applications...")
             document_ids = []
+            duplicates_count = 0
+            new_count = 0
             
             for idx, job_data in enumerate(jobs_data, 1):
                 print(f"\n[Firebase] [BATCH] Processing job {idx}/{len(jobs_data)}...")
                 try:
-                    doc_id = self.save_job_application(user_id, job_data)
-                    document_ids.append(doc_id)
-                    print(f"[Firebase] [BATCH] ✓ Successfully saved job {idx} with ID: {doc_id}")
+                    # Check if this is a duplicate before attempting save
+                    existing_doc_id = self._check_job_application_duplicate(user_id, job_data)
+                    if existing_doc_id:
+                        document_ids.append(existing_doc_id)
+                        duplicates_count += 1
+                        print(f"[Firebase] [BATCH] ⚠️  Duplicate found for job {idx}, skipping save. Existing ID: {existing_doc_id}")
+                    else:
+                        doc_id = self.save_job_application(user_id, job_data)
+                        document_ids.append(doc_id)
+                        new_count += 1
+                        print(f"[Firebase] [BATCH] ✓ Successfully saved job {idx} with ID: {doc_id}")
                 except Exception as job_error:
                     print(f"[Firebase] [BATCH] [ERROR] Failed to save job {idx}: {str(job_error)}")
                     import traceback
@@ -499,7 +567,8 @@ class FirebaseService:
                     # Continue with other jobs even if one fails
                     continue
             
-            print(f"\n[Firebase] [BATCH] Completed: {len(document_ids)}/{len(jobs_data)} jobs saved successfully")
+            print(f"\n[Firebase] [BATCH] Completed: {len(document_ids)}/{len(jobs_data)} jobs processed")
+            print(f"[Firebase] [BATCH] - New: {new_count}, Duplicates: {duplicates_count}, Errors: {len(jobs_data) - len(document_ids)}")
             return document_ids
             
         except Exception as e:
@@ -508,8 +577,63 @@ class FirebaseService:
             print(f"[Firebase] [BATCH] Traceback: {traceback.format_exc()}")
             raise RuntimeError(f"Failed to save job applications batch for user {user_id}: {str(e)}")
 
+    def _check_sponsorship_duplicate(self, user_id: str, company_name: str, request_id: Optional[str] = None) -> Optional[str]:
+        """
+        Check if a sponsorship check already exists for this user and company.
+        
+        Args:
+            user_id: The user ID
+            company_name: The company name
+            request_id: Optional request ID to check (if provided, checks for exact match)
+            
+        Returns:
+            Document ID of existing duplicate if found, None otherwise
+        """
+        try:
+            db = FirebaseService._db
+            if db is None:
+                return None
+            
+            collection_ref = db.collection("sponsorship_checks").document(user_id).collection("checks")
+            
+            # Strategy 1: Check by request_id (most specific - same match-jobs request)
+            if request_id:
+                query = collection_ref.where("requestId", "==", request_id).limit(1)
+                docs = query.stream()
+                for doc in docs:
+                    print(f"[Firebase] [SPONSORSHIP] [DUPLICATE] Found duplicate sponsorship by request_id: {doc.id}")
+                    return doc.id
+            
+            # Strategy 2: Check by company name (same company checked before)
+            if company_name and company_name.strip():
+                company_name_clean = company_name.strip()
+                query = collection_ref.where("companyName", "==", company_name_clean).limit(1)
+                docs = query.stream()
+                for doc in docs:
+                    print(f"[Firebase] [SPONSORSHIP] [DUPLICATE] Found duplicate sponsorship by company: {doc.id}")
+                    return doc.id
+            
+            return None
+            
+        except Exception as e:
+            print(f"[Firebase] [SPONSORSHIP] [DUPLICATE] Error checking for duplicate: {e}")
+            # Don't fail on duplicate check errors, just log and continue
+            return None
+    
     def save_sponsorship_info(self, user_id: str, request_id: str, sponsorship_data: Dict[str, Any], job_info: Optional[Dict[str, Any]] = None) -> str:
-       
+        """
+        Save sponsorship information to Firestore.
+        Checks for duplicates before saving.
+        
+        Args:
+            user_id: The user ID
+            request_id: The request ID (unique per match-jobs call)
+            sponsorship_data: Dictionary containing sponsorship data
+            job_info: Optional job information dictionary
+            
+        Returns:
+            The document ID of the saved sponsorship (or existing duplicate)
+        """
         try:
             print(f"\n{'='*70}")
             print(f"[Firebase] [SPONSORSHIP] Starting save_sponsorship_info")
@@ -556,10 +680,20 @@ class FirebaseService:
                 print(f"[Firebase] [SPONSORSHIP] [AUTH] This may indicate credential/permission issues")
                 # Don't fail here, but log the warning - the actual save will show the real error
             
-            print(f"[Firebase] [SPONSORSHIP] [INFO] Saving sponsorship info for user: {user_id}")
-            
-            # Extract company info from job_info or sponsorship_data
+            # Extract company name for duplicate check and document preparation
             company_name = job_info.get("company") if job_info else sponsorship_data.get("company_name", "")
+            
+            # Check for duplicates before saving
+            print(f"[Firebase] [SPONSORSHIP] [DUPLICATE] Checking for duplicate sponsorship check...")
+            existing_doc_id = self._check_sponsorship_duplicate(user_id, company_name, request_id)
+            if existing_doc_id:
+                print(f"[Firebase] [SPONSORSHIP] [DUPLICATE] ✓ Duplicate found, skipping save. Existing document ID: {existing_doc_id}")
+                print(f"[Firebase] [SPONSORSHIP] [DUPLICATE] Path: sponsorship_checks/{user_id}/checks/{existing_doc_id}")
+                print(f"{'='*70}\n")
+                return existing_doc_id
+            
+            print(f"[Firebase] [SPONSORSHIP] [DUPLICATE] No duplicate found, proceeding with save...")
+            print(f"[Firebase] [SPONSORSHIP] [INFO] Saving sponsorship info for user: {user_id}")
             portal = job_info.get("portal", "") if job_info else ""
             job_url = job_info.get("job_url", "") if job_info else ""
             

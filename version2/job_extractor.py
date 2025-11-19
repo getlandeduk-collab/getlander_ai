@@ -136,10 +136,30 @@ def extract_jobs_from_response(api_response: dict) -> List[dict]:
             # Add summary (prefer scraped_summary if available, otherwise summary)
             description_text = scraped_summary if scraped_summary else summary
             if description_text:
-                # Truncate description if too long (keep first 1000 chars)
-                if len(description_text) > 1000:
-                    description_text = description_text[:1000] + "..."
-                job_description_parts.append(description_text)
+                # Truncate description if too long (max 5000 chars, but prefer complete sentences)
+                max_length = 5000
+                if len(description_text) > max_length:
+                    # Find the last complete sentence before max_length
+                    truncated = description_text[:max_length]
+                    # Try to find the last sentence ending
+                    last_period = truncated.rfind('.')
+                    last_exclamation = truncated.rfind('!')
+                    last_question = truncated.rfind('?')
+                    last_sentence_end = max(last_period, last_exclamation, last_question)
+                    
+                    if last_sentence_end > max_length * 0.7:  # Only use if we're keeping at least 70% of max
+                        description_text = description_text[:last_sentence_end + 1]
+                    else:
+                        # If no good sentence boundary, try word boundary
+                        last_space = truncated.rfind(' ')
+                        if last_space > max_length * 0.7:
+                            description_text = description_text[:last_space] + "..."
+                        else:
+                            description_text = truncated + "..."
+                
+                # Format summary with label
+                if description_text.strip():
+                    job_description_parts.append(f"**Summary:** {description_text}")
             
             # Add key matches
             if key_matches:

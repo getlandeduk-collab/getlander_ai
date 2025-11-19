@@ -346,3 +346,85 @@ def check_sponsorship(company_name: Optional[str], job_content: Optional[str] = 
             'summary': f'Error checking sponsorship: {str(e)}'
         }
 
+
+def get_company_info_from_web(company_name: str, openai_api_key: Optional[str] = None) -> Optional[str]:
+    """
+    Get company information from the web using Phi agent with DuckDuckGo search.
+    
+    Args:
+        company_name: Company name to search for
+        openai_api_key: OpenAI API key (if not provided, will use OPENAI_API_KEY env var)
+        
+    Returns:
+        Company information string or None if error occurs
+    """
+    if not company_name:
+        return None
+    
+    try:
+        from phi.agent import Agent
+        from phi.model.openai import OpenAIChat
+        from phi.tools.duckduckgo import DuckDuckGo
+        
+        # Get API key
+        api_key = openai_api_key or os.getenv("OPENAI_API_KEY")
+        if not api_key:
+            print(f"[Company Info] OpenAI API key not available, skipping web search")
+            return None
+        
+        print(f"[Company Info] Fetching company information for: {company_name}")
+        
+        # Create web agent
+        web_agent = Agent(
+            name="Company Info Agent",
+            model=OpenAIChat(id="gpt-4o", api_key=api_key),
+            tools=[DuckDuckGo()],
+            instructions=[
+                "Search for information about the company including:",
+                "- Company overview and industry",
+                "- Company size and headquarters location",
+                "- Recent news or developments",
+                "- Company culture and values (if available)",
+                "Always include sources in your response.",
+                "Keep the response concise and informative (2-3 paragraphs maximum)."
+            ],
+            show_tool_calls=False,
+            markdown=False,
+        )
+        
+        # Search query
+        query = f"Tell me about {company_name} company: overview, industry, size, headquarters, and recent news"
+        
+        # Get response (non-streaming for simplicity)
+        response = web_agent.run(query, stream=False)
+        
+        # Extract content from RunResponse
+        company_info = None
+        if hasattr(response, 'content'):
+            company_info = response.content
+            # Convert to string if it's not already
+            if not isinstance(company_info, str):
+                company_info = str(company_info)
+        elif isinstance(response, str):
+            company_info = response
+        else:
+            # Try to get text representation
+            company_info = str(response)
+        
+        if company_info and len(company_info.strip()) > 0:
+            print(f"[Company Info] Successfully fetched company information ({len(company_info)} characters)")
+            return company_info
+        else:
+            print(f"[Company Info] No company information returned from web search")
+            return None
+        
+    except ImportError as e:
+        print(f"[Company Info] Phi agent dependencies not available: {e}")
+        print(f"[Company Info] Install phidata: pip install phidata")
+        return None
+    except Exception as e:
+        print(f"[Company Info] Error fetching company information: {e}")
+        import traceback
+        print(traceback.format_exc())
+        return None
+
