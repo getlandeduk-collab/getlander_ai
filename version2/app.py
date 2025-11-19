@@ -3506,6 +3506,160 @@ async def playwright_scrape(
                         scraped_data = None
                     else:
                         print(f"[SUCCESS] Firecrawl scraped {len(text_content)} characters")
+                        
+                        # Send Firecrawl content to summarizer/scraper agent to extract structured fields
+                        try:
+                            print(f"\n{'='*80}")
+                            print(f"SUMMARIZER AGENT - Extracting structured fields from Firecrawl content")
+                            print(f"{'='*80}")
+                            
+                            openai_key = settings.openai_api_key or os.getenv("OPENAI_API_KEY")
+                            if openai_key:
+                                def extract_fields_with_agent(fc_content: str, fc_url: str) -> Dict[str, Any]:
+                                    """Use scraper agent to extract structured fields from Firecrawl content."""
+                                    from agents import build_scraper
+                                    
+                                    # Build scraper agent (it can process content directly)
+                                    scraper_agent = build_scraper(firecrawl_api_key)
+                                    
+                                    # Create prompt with the scraped content (limit to 10k chars to avoid token limits)
+                                    content_preview = fc_content[:10000]
+                                    prompt = f"""Extract ALL available information from this scraped job posting content.
+
+URL: {fc_url}
+
+Scraped Content:
+{content_preview}
+
+CRITICAL: Extract the following REQUIRED fields:
+1. **Job title** (REQUIRED - exact title from posting)
+2. **Company name** (REQUIRED - name of the hiring company)
+3. Complete job description
+4. Required skills (list each skill separately)
+5. Required experience (years and type)
+6. Qualifications and education requirements
+7. Responsibilities
+8. Salary/compensation (if mentioned)
+9. Location
+10. Job type (full-time, internship, etc.)
+
+Return structured data with all fields clearly labeled. If a field is not found, mark it as 'Not specified'.
+"""
+                                    
+                                    # Get response from agent
+                                    response = scraper_agent.run(prompt)
+                                    
+                                    # Extract content from response
+                                    if hasattr(response, 'content'):
+                                        response_text = str(response.content)
+                                    elif hasattr(response, 'messages') and response.messages:
+                                        last_msg = response.messages[-1]
+                                        response_text = str(last_msg.content if hasattr(last_msg, 'content') else last_msg)
+                                    else:
+                                        response_text = str(response)
+                                    
+                                    response_text = response_text.strip()
+                                    
+                                    # Try to extract structured fields from response
+                                    # Look for patterns like "Job Title: ...", "Company: ...", etc.
+                                    extracted_fields = {}
+                                    
+                                    # Extract job title
+                                    title_patterns = [
+                                        r'(?:Job\s+Title|Title|Position)[:\s]+([^\n]+)',
+                                        r'\*\*Job\s+Title\*\*[:\s]+([^\n]+)',
+                                        r'1\.\s*\*\*Job\s+title\*\*[:\s]+([^\n]+)',
+                                    ]
+                                    for pattern in title_patterns:
+                                        match = re.search(pattern, response_text, re.I)
+                                        if match:
+                                            extracted_fields['job_title'] = clean_job_title(match.group(1).strip())
+                                            break
+                                    
+                                    # Extract company name
+                                    company_patterns = [
+                                        r'(?:Company\s+Name|Company|Employer|Organization)[:\s]+([^\n]+)',
+                                        r'\*\*Company\s+Name\*\*[:\s]+([^\n]+)',
+                                        r'2\.\s*\*\*Company\s+name\*\*[:\s]+([^\n]+)',
+                                    ]
+                                    for pattern in company_patterns:
+                                        match = re.search(pattern, response_text, re.I)
+                                        if match:
+                                            extracted_fields['company_name'] = clean_company_name(match.group(1).strip())
+                                            break
+                                    
+                                    # Extract location
+                                    location_patterns = [
+                                        r'(?:Location|Job\s+Location)[:\s]+([^\n]+)',
+                                        r'\*\*Location\*\*[:\s]+([^\n]+)',
+                                        r'9\.\s*\*\*Location\*\*[:\s]+([^\n]+)',
+                                    ]
+                                    for pattern in location_patterns:
+                                        match = re.search(pattern, response_text, re.I)
+                                        if match:
+                                            extracted_fields['location'] = match.group(1).strip()
+                                            break
+                                    
+                                    # Extract description (usually the longest section)
+                                    desc_patterns = [
+                                        r'(?:Job\s+Description|Description|Complete\s+job\s+description)[:\s]+(.*?)(?:\n\n(?:Required|Qualifications|Skills|Responsibilities|Salary|Location|Job\s+Type)|$)',
+                                        r'\*\*Complete\s+job\s+description\*\*[:\s]+(.*?)(?:\n\n\*\*|$)',
+                                        r'3\.\s*\*\*Complete\s+job\s+description\*\*[:\s]+(.*?)(?:\n\n\d+\.|$)',
+                                    ]
+                                    for pattern in desc_patterns:
+                                        match = re.search(pattern, response_text, re.I | re.DOTALL)
+                                        if match:
+                                            extracted_fields['description'] = match.group(1).strip()
+                                            break
+                                    
+                                    # If no structured extraction worked, use the full response as description
+                                    if 'description' not in extracted_fields:
+                                        extracted_fields['description'] = response_text
+                                    
+                                    # Also try extraction from original content as fallback
+                                    if not extracted_fields.get('job_title'):
+                                        extracted_fields['job_title'] = extract_job_title_from_content(fc_content)
+                                    if not extracted_fields.get('company_name'):
+                                        extracted_fields['company_name'] = extract_company_name_from_content(fc_content)
+                                    
+                                    return extracted_fields
+                                
+                                # Extract structured fields using agent
+                                extracted_fields = await asyncio.to_thread(
+                                    extract_fields_with_agent,
+                                    text_content,
+                                    actual_url
+                                )
+                                
+                                # Update scraped_data with extracted fields (prefer agent-extracted over HTML-parsed)
+                                if extracted_fields.get('job_title'):
+                                    scraped_data['job_title'] = extracted_fields['job_title']
+                                    print(f"[AGENT] Extracted job title: {extracted_fields['job_title']}")
+                                
+                                if extracted_fields.get('company_name'):
+                                    scraped_data['company_name'] = extracted_fields['company_name']
+                                    print(f"[AGENT] Extracted company name: {extracted_fields['company_name']}")
+                                
+                                if extracted_fields.get('location'):
+                                    scraped_data['location'] = extracted_fields['location']
+                                    print(f"[AGENT] Extracted location: {extracted_fields['location']}")
+                                
+                                if extracted_fields.get('description'):
+                                    # Merge agent-extracted description with original if it's more detailed
+                                    agent_desc = extracted_fields['description']
+                                    original_desc = scraped_data.get('description') or ''
+                                    if len(agent_desc) > len(original_desc):
+                                        scraped_data['description'] = agent_desc
+                                        print(f"[AGENT] Updated description ({len(agent_desc)} chars)")
+                                
+                                print(f"[SUCCESS] Agent extracted structured fields from Firecrawl content")
+                            else:
+                                print(f"[WARNING] OpenAI API key not available, skipping agent extraction")
+                        except Exception as agent_error:
+                            print(f"[WARNING] Agent extraction failed: {agent_error}")
+                            # Continue with original scraped_data even if agent extraction fails
+                            import traceback
+                            traceback.print_exc()
                 else:
                     print(f"[WARNING] Firecrawl API key not available, skipping Firecrawl fallback")
             except Exception as e:
