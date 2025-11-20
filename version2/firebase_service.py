@@ -556,10 +556,10 @@ class FirebaseService:
                         duplicates_count += 1
                         print(f"[Firebase] [BATCH] ⚠️  Duplicate found for job {idx}, skipping save. Existing ID: {existing_doc_id}")
                     else:
-                    doc_id = self.save_job_application(user_id, job_data)
-                    document_ids.append(doc_id)
+                        doc_id = self.save_job_application(user_id, job_data)
+                        document_ids.append(doc_id)
                         new_count += 1
-                    print(f"[Firebase] [BATCH] ✓ Successfully saved job {idx} with ID: {doc_id}")
+                        print(f"[Firebase] [BATCH] ✓ Successfully saved job {idx} with ID: {doc_id}")
                 except Exception as job_error:
                     print(f"[Firebase] [BATCH] [ERROR] Failed to save job {idx}: {str(job_error)}")
                     import traceback
@@ -759,7 +759,7 @@ class FirebaseService:
             
             # CRITICAL: Save the document and get the result
             try:
-            result = collection_ref.add(document_data)
+                result = collection_ref.add(document_data)
                 print(f"[Firebase] [SPONSORSHIP] [DEBUG] add() returned: {result}")
                 print(f"[Firebase] [SPONSORSHIP] [DEBUG] Result type: {type(result)}")
             except Exception as save_error:
@@ -797,8 +797,8 @@ class FirebaseService:
             doc = None
             for attempt in range(3):
                 try:
-            doc = collection_ref.document(doc_id).get()
-            if doc.exists:
+                    doc = collection_ref.document(doc_id).get()
+                    if doc.exists:
                         break
                     if attempt < 2:
                         print(f"[Firebase] [SPONSORSHIP] [VERIFY] Attempt {attempt + 1} failed, retrying in 0.5s...")

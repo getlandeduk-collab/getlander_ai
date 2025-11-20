@@ -46,6 +46,20 @@ def decode_base64_pdf(b64: str) -> bytes:
 def extract_text_from_pdf_bytes(pdf_bytes: bytes, max_chars: int = 20000) -> str:
     if not pdf_bytes or len(pdf_bytes) < 10:
         raise ValueError("Empty or invalid PDF bytes")
+    
+    # Validate that this is actually a PDF by checking the PDF header
+    # PDF files should start with "%PDF-" (bytes: 25 50 44 46 2D)
+    if not pdf_bytes.startswith(b'%PDF-'):
+        # Try to find PDF header in first 1024 bytes (some PDFs have metadata before header)
+        found_header = False
+        for i in range(min(1024, len(pdf_bytes) - 5)):
+            if pdf_bytes[i:i+5] == b'%PDF-':
+                found_header = True
+                pdf_bytes = pdf_bytes[i:]  # Remove any prefix before PDF header
+                break
+        if not found_header:
+            raise ValueError(f"Invalid PDF: File does not start with PDF header. First 50 bytes: {pdf_bytes[:50]}")
+    
     text_parts = []
     with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
         for page in pdf.pages:

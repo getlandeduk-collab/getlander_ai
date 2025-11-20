@@ -27,3 +27,4 @@ firebase-admin==6.6.0
 
 ddgs
 playwright
+python-multipart
