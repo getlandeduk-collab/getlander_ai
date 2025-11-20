@@ -3269,13 +3269,17 @@ Explain:
 
 - Important considerations
 
+- Location information (if mentioned in the job description)
+
 - Visa sponsorship or scholarship information (if mentioned in the job description)
 
 
 
-IMPORTANT: Check the job description for visa sponsorship, visa support, scholarship, H1B, work permit, financial support, or tuition assistance information. 
+IMPORTANT: Focus on the job description content only. Do not include scraped HTML or raw page content.
 
-If found, include it in the summary. If not mentioned, state "No visa sponsorship or scholarship information mentioned."
+Check the job description for visa sponsorship, visa support, scholarship, H1B, work permit, financial support, or tuition assistance information. 
+
+If found, include it in the summary. Do not mention if it's not found in the description - it will be checked separately.
 
 
 
@@ -3456,6 +3460,17 @@ Be honest about the fit level based on the score.
 
             
 
+            # Extract location from job description
+            location = None
+            if job.description:
+                try:
+                    from sponsorship_checker import _extract_location_from_job_content
+                    location = _extract_location_from_job_content(job.description)
+                    if location:
+                        print(f"[Location] Extracted location for job {rank}: {location}")
+                except Exception as e:
+                    print(f"[Location] Error extracting location: {e}")
+            
             return MatchedJob(
 
                 rank=rank,
@@ -3476,7 +3491,9 @@ Be honest about the fit level based on the score.
 
                 total_requirements=entry["total_requirements"],
 
-                scraped_summary=SCRAPE_CACHE.get(str(job.url), {}).get('scraped_summary'),
+                location=location,
+
+                scraped_summary=None,  # Remove duplicate - summary field contains all needed info
 
             )
 
@@ -3632,7 +3649,9 @@ Be honest about the fit level based on the score.
 
                             "total_requirements": job.total_requirements,
 
-                            "scraped_summary": job.scraped_summary,
+                            "location": job.location,
+
+                            # Removed scraped_summary - redundant with summary field
 
                         }
 
@@ -3725,8 +3744,11 @@ Be honest about the fit level based on the score.
             try:
                 from sponsorship_checker import check_sponsorship, get_company_info_from_web
                 
+                # Get OpenAI API key for agent-based company matching
+                openai_key = settings.openai_api_key or os.getenv("OPENAI_API_KEY")
+                
                 print(f"[Sponsorship] Checking company: {company_name}")
-                sponsorship_result = check_sponsorship(company_name, job_content)
+                sponsorship_result = check_sponsorship(company_name, job_content, openai_key)
                 
                 # Get company info from web using Phi agent
                 company_info_summary = None
@@ -3744,14 +3766,83 @@ Be honest about the fit level based on the score.
                         print(f"[Sponsorship] Error fetching company info from web: {e}")
                         # Continue without web info - not critical
                 
-                # Build enhanced summary
+                # Build enhanced summary (ensure consistent plain text formatting)
                 base_summary = sponsorship_result.get('summary', 'No sponsorship information available')
+                # Clean and normalize the base summary
+                base_summary = clean_summary_text(base_summary)
                 enhanced_summary = base_summary
                 
                 if company_info_summary:
-                    # Append company info to the summary
-                    enhanced_summary = f"{base_summary}\n\nCompany Information:\n{company_info_summary}"
-                    print(f"[Sponsorship] Enhanced summary with company information from web")
+                    # Clean company info
+                    company_info_cleaned = clean_summary_text(company_info_summary)
+                    
+                    # Remove redundant visa sponsorship information from company info
+                    # (since we already have it confirmed from CSV)
+                    sponsors_workers = sponsorship_result.get('sponsors_workers', False)
+                    if sponsors_workers:
+                        # Split into sentences and filter out redundant ones about visa sponsorship
+                        sentences = re.split(r'[.!?]+', company_info_cleaned)
+                        filtered_sentences = []
+                        
+                        for sentence in sentences:
+                            sentence = sentence.strip()
+                            if not sentence or len(sentence) < 10:
+                                continue
+                            
+                            sentence_lower = sentence.lower()
+                            
+                            # Skip sentences about visa sponsorship that are uncertain/redundant
+                            # since we already have confirmed info from CSV
+                            if any(phrase in sentence_lower for phrase in ['visa sponsorship', 'visa sponsor', 'visa not', 'visa information']):
+                                # If it mentions uncertainty or suggests contacting, skip it
+                                if any(uncertain_phrase in sentence_lower for uncertain_phrase in [
+                                    'not found', 'was not found', 'not available', 'uncertain',
+                                    'potentially', 'generally', 'might', 'may', 'could', 'contact',
+                                    'check', 'definitive information', 'advisable', 'check their',
+                                    'hr department', 'official careers', 'cannot be filled'
+                                ]):
+                                    continue  # Skip this redundant sentence
+                            
+                            filtered_sentences.append(sentence)
+                        
+                        # Rejoin sentences
+                        company_info_cleaned = '. '.join(filtered_sentences)
+                        if company_info_cleaned and not company_info_cleaned.endswith(('.', '!', '?')):
+                            company_info_cleaned += '.'
+                        company_info_cleaned = re.sub(r'\s+', ' ', company_info_cleaned).strip()
+                    
+                    # Only append company info if there's substantial unique content
+                    # (avoid repeating what's already in base_summary)
+                    if company_info_cleaned and len(company_info_cleaned.strip()) > 30:
+                        # Check for overlap with base_summary to avoid duplication
+                        if base_summary:
+                            base_lower = base_summary.lower()
+                            company_lower = company_info_cleaned.lower()
+                            
+                            # Simple overlap check - if too similar, skip
+                            # Count common significant words (longer than 4 chars)
+                            base_words = {w for w in base_lower.split() if len(w) > 4}
+                            company_words = {w for w in company_lower.split() if len(w) > 4}
+                            common_words = base_words & company_words
+                            
+                            # If more than 40% overlap in significant content, don't duplicate
+                            if len(common_words) > 0 and len(common_words) / max(len(company_words), 1) > 0.4:
+                                # Just use base summary to avoid repetition
+                                enhanced_summary = base_summary
+                            else:
+                                # Add unique company information
+                                enhanced_summary = f"{base_summary}. {company_info_cleaned}"
+                        else:
+                            enhanced_summary = company_info_cleaned
+                    else:
+                        # Not enough content, just use base summary
+                        enhanced_summary = base_summary
+                    
+                    # Normalize whitespace and remove duplicate periods
+                    enhanced_summary = re.sub(r'\s+', ' ', enhanced_summary)
+                    enhanced_summary = re.sub(r'\.\s*\.', '.', enhanced_summary)  # Remove double periods
+                    enhanced_summary = enhanced_summary.strip()
+                    print(f"[Sponsorship] Enhanced summary with company information from web (removed redundant visa sponsorship info)")
                 
                 sponsorship_info = SponsorshipInfo(
                     company_name=sponsorship_result.get('company_name'),
@@ -3763,6 +3854,61 @@ Be honest about the fit level based on the score.
                 print(f"[Sponsorship] Result: {'✓ Sponsors workers' if sponsorship_info.sponsors_workers else '✗ Does not sponsor workers'}")
                 if sponsorship_info.visa_types:
                     print(f"[Sponsorship] Visa types: {sponsorship_info.visa_types}")
+                
+                # Update matched job summary to reflect actual sponsorship info (remove "No mention..." text)
+                if matched_jobs and len(matched_jobs) > 0:
+                    top_job = matched_jobs[0]
+                    if top_job.summary:
+                        summary_text = top_job.summary
+                        
+                        # Remove "No mention..." or similar text about sponsorship (comprehensive patterns)
+                        patterns_to_remove = [
+                            r'No\s+specific\s+information\s+about\s+visa\s+sponsorship[^.]*\.',
+                            r'No\s+mention\s+was\s+made\s+of\s+any\s+visa\s+sponsorship[^.]*\.',
+                            r'No\s+(?:mention\s+was\s+made\s+of\s+any\s+)?visa\s+sponsorship[^.]*\.',
+                            r'No\s+visa\s+sponsorship[^.]*\.',
+                            r'visa\s+sponsorship[^.]*not\s+mentioned[^.]*\.',
+                            r'visa\s+sponsorship[^.]*is\s+not\s+mentioned[^.]*\.',
+                            r'no\s+information\s+about\s+visa\s+sponsorship[^.]*\.',
+                            r'scholarship[^.]*not\s+mentioned[^.]*\.',
+                        ]
+                        
+                        for pattern in patterns_to_remove:
+                            summary_text = re.sub(pattern, '', summary_text, flags=re.IGNORECASE)
+                        
+                        # Remove sentences about location and visa sponsorship that are now redundant
+                        summary_text = re.sub(
+                            r'(?:The\s+role\s+)?does\s+not\s+specify\s+a\s+location[^.]*\.',
+                            '',
+                            summary_text,
+                            flags=re.IGNORECASE
+                        )
+                        
+                        # Normalize whitespace after removal
+                        summary_text = re.sub(r'\s+', ' ', summary_text)
+                        summary_text = summary_text.strip()
+                        
+                        # Remove trailing/leading punctuation issues from removals
+                        summary_text = re.sub(r'\s+([,.;])\s+', r'\1 ', summary_text)
+                        summary_text = re.sub(r'\s+([,.;])\s*$', '', summary_text)
+                        
+                        # Add actual sponsorship information if found
+                        if sponsorship_info.sponsors_workers:
+                            sponsorship_text = f"Visa Sponsorship: {sponsorship_info.company_name} is a registered UK visa sponsor"
+                            if sponsorship_info.visa_types:
+                                sponsorship_text += f" (Visa Routes: {sponsorship_info.visa_types})"
+                            sponsorship_text += "."
+                            
+                            # Append sponsorship info to summary (ensure it doesn't duplicate)
+                            if "visa sponsor" not in summary_text.lower() and "visa sponsorship" not in summary_text.lower():
+                                summary_text = f"{summary_text} {sponsorship_text}" if summary_text else sponsorship_text
+                        
+                        # Clean and normalize the updated summary
+                        summary_text = clean_summary_text(summary_text)
+                        
+                        # Update the matched job summary
+                        top_job.summary = summary_text
+                        print(f"[Sponsorship] Updated matched job summary with actual sponsorship information")
                 
                 # Save sponsorship info to Firestore as a separate document
                 try:

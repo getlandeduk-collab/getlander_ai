@@ -577,9 +577,53 @@ class FirebaseService:
             print(f"[Firebase] [BATCH] Traceback: {traceback.format_exc()}")
             raise RuntimeError(f"Failed to save job applications batch for user {user_id}: {str(e)}")
 
+    def _normalize_company_name(self, name: str) -> str:
+        """
+        Normalize company name for duplicate checking.
+        Removes legal suffixes, extra whitespace, and converts to lowercase.
+        
+        Args:
+            name: Company name to normalize
+            
+        Returns:
+            Normalized company name
+        """
+        if not name or not isinstance(name, str):
+            return ""
+        
+        import re
+        
+        # Remove quotes and extra whitespace
+        normalized = name.strip().strip('"').strip("'").strip()
+        
+        # Convert to lowercase for case-insensitive comparison
+        normalized = normalized.lower()
+        
+        # Remove common legal suffixes (case-insensitive)
+        suffixes = [
+            r'\s+inc\.?$', r'\s+incorporated$',
+            r'\s+ltd\.?$', r'\s+limited$',
+            r'\s+llc\.?$', r'\s+ll\.?c\.?$',
+            r'\s+corp\.?$', r'\s+corporation$',
+            r'\s+plc\.?$', r'\s+public limited company$',
+            r'\s+llp\.?$', r'\s+limited liability partnership$',
+            r'\s+p\.?c\.?$', r'\s+professional corporation$',
+            r'\s+co\.?$', r'\s+company$',
+            r'\s+group$', r'\s+holdings?$',
+        ]
+        
+        for suffix_pattern in suffixes:
+            normalized = re.sub(suffix_pattern, '', normalized, flags=re.IGNORECASE)
+        
+        # Remove extra whitespace
+        normalized = re.sub(r'\s+', ' ', normalized).strip()
+        
+        return normalized
+    
     def _check_sponsorship_duplicate(self, user_id: str, company_name: str, request_id: Optional[str] = None) -> Optional[str]:
         """
         Check if a sponsorship check already exists for this user and company.
+        Uses multiple strategies to catch duplicates even with name variations.
         
         Args:
             user_id: The user ID
@@ -604,21 +648,50 @@ class FirebaseService:
                     print(f"[Firebase] [SPONSORSHIP] [DUPLICATE] Found duplicate sponsorship by request_id: {doc.id}")
                     return doc.id
             
-            # Strategy 2: Check by company name (same company checked before)
+            # Strategy 2: Check by exact company name match (case-sensitive)
             if company_name and company_name.strip():
                 company_name_clean = company_name.strip()
                 query = collection_ref.where("companyName", "==", company_name_clean).limit(1)
                 docs = query.stream()
                 for doc in docs:
-                    print(f"[Firebase] [SPONSORSHIP] [DUPLICATE] Found duplicate sponsorship by company: {doc.id}")
+                    print(f"[Firebase] [SPONSORSHIP] [DUPLICATE] Found duplicate sponsorship by exact company name: {doc.id}")
                     return doc.id
+            
+            # Strategy 3 & 4: Check by normalized and case-insensitive company name (single pass)
+            # Handles variations like "Google" vs "Google LLC", "Microsoft" vs "microsoft", etc.
+            if company_name and company_name.strip():
+                normalized_name = self._normalize_company_name(company_name)
+                company_name_lower = company_name.strip().lower()
+                
+                if normalized_name or company_name_lower:
+                    # Get all documents for this user and check in a single pass
+                    all_docs = collection_ref.stream()
+                    for doc in all_docs:
+                        doc_data = doc.to_dict()
+                        existing_company = doc_data.get("companyName", "")
+                        if existing_company:
+                            # Check normalized match first (more robust)
+                            if normalized_name:
+                                existing_normalized = self._normalize_company_name(existing_company)
+                                if existing_normalized == normalized_name:
+                                    print(f"[Firebase] [SPONSORSHIP] [DUPLICATE] Found duplicate sponsorship by normalized company name: {doc.id}")
+                                    print(f"[Firebase] [SPONSORSHIP] [DUPLICATE] Original: '{company_name}' -> Normalized: '{normalized_name}'")
+                                    print(f"[Firebase] [SPONSORSHIP] [DUPLICATE] Existing: '{existing_company}' -> Normalized: '{existing_normalized}'")
+                                    return doc.id
+                            
+                            # Fallback: Check case-insensitive match
+                            if company_name_lower and existing_company.strip().lower() == company_name_lower:
+                                print(f"[Firebase] [SPONSORSHIP] [DUPLICATE] Found duplicate sponsorship by case-insensitive company name: {doc.id}")
+                                return doc.id
             
             return None
         
         except Exception as e:
             print(f"[Firebase] [SPONSORSHIP] [DUPLICATE] Error checking for duplicate: {e}")
+            import traceback
+            print(f"[Firebase] [SPONSORSHIP] [DUPLICATE] Traceback: {traceback.format_exc()}")
             # Don't fail on duplicate check errors, just log and continue
-        return None
+            return None
     
     def save_sponsorship_info(self, user_id: str, request_id: str, sponsorship_data: Dict[str, Any], job_info: Optional[Dict[str, Any]] = None) -> str:
         """

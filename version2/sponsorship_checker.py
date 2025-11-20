@@ -138,87 +138,118 @@ def extract_company_name(job_content: str, job_company: Optional[str] = None) ->
     return None
 
 
-def find_company_in_csv(company_name: str, df: pd.DataFrame, threshold: int = 80) -> Optional[Dict[str, Any]]:
+def find_multiple_company_matches_in_csv(company_name: str, df: pd.DataFrame, threshold: int = 70, top_n: int = 5) -> List[Dict[str, Any]]:
     """
-    Find company in CSV using fuzzy matching with multiple strategies.
+    Find multiple company matches in CSV using fuzzy matching with multiple strategies.
+    Returns top N matches sorted by score.
     
     Args:
         company_name: Company name to search for
         df: DataFrame with sponsorship data
-        threshold: Minimum similarity score (0-100) - lowered to 80 for better matching
+        threshold: Minimum similarity score (0-100) - lowered to 70 to get more candidates
+        top_n: Number of top matches to return
         
     Returns:
-        Dictionary with company info if found, None otherwise
+        List of dictionaries with company info, sorted by match score (highest first)
     """
     if not company_name or not FUZZYWUZZY_AVAILABLE:
         print(f"[Sponsorship] Fuzzy matching not available or company name is empty")
-        return None
+        return []
     
     cleaned_name = clean_company_name(company_name)
     if not cleaned_name:
         print(f"[Sponsorship] Company name could not be cleaned: {company_name}")
-        return None
+        return []
     
-    print(f"[Sponsorship] Searching for company: '{company_name}' (cleaned: '{cleaned_name}')")
+    print(f"[Sponsorship] Searching for multiple matches for company: '{company_name}' (cleaned: '{cleaned_name}')")
     
     # Get all organization names from CSV
     org_names = df['Organisation Name'].astype(str).tolist()
     
-    # Use fuzzy matching to find best match with multiple strategies
+    # Collect all unique matches from different strategies
+    all_matches = {}
+    
     try:
         # Strategy 1: Token sort ratio (handles word order differences)
-        best_match_1, score_1 = process.extractOne(
-            cleaned_name,
-            org_names,
-            scorer=fuzz.token_sort_ratio
-        )
+        matches_1 = process.extract(cleaned_name, org_names, scorer=fuzz.token_sort_ratio, limit=top_n)
+        for match, score in matches_1:
+            if match not in all_matches or all_matches[match]['max_score'] < score:
+                all_matches[match] = {
+                    'company_name': match,
+                    'max_score': score,
+                    'token_sort_score': score,
+                    'strategy': 'token_sort'
+                }
         
-        # Strategy 2: Partial ratio (handles substring matches like "UK" vs "United Kingdom")
-        best_match_2, score_2 = process.extractOne(
-            cleaned_name,
-            org_names,
-            scorer=fuzz.partial_ratio
-        )
+        # Strategy 2: Partial ratio (handles substring matches)
+        matches_2 = process.extract(cleaned_name, org_names, scorer=fuzz.partial_ratio, limit=top_n)
+        for match, score in matches_2:
+            if match not in all_matches:
+                all_matches[match] = {
+                    'company_name': match,
+                    'max_score': score,
+                    'partial_score': score,
+                    'strategy': 'partial'
+                }
+            else:
+                all_matches[match]['partial_score'] = score
+                if score > all_matches[match]['max_score']:
+                    all_matches[match]['max_score'] = score
+                    all_matches[match]['strategy'] = 'partial'
         
         # Strategy 3: Token set ratio (handles duplicates and word order)
-        best_match_3, score_3 = process.extractOne(
-            cleaned_name,
-            org_names,
-            scorer=fuzz.token_set_ratio
-        )
+        matches_3 = process.extract(cleaned_name, org_names, scorer=fuzz.token_set_ratio, limit=top_n)
+        for match, score in matches_3:
+            if match not in all_matches:
+                all_matches[match] = {
+                    'company_name': match,
+                    'max_score': score,
+                    'token_set_score': score,
+                    'strategy': 'token_set'
+                }
+            else:
+                all_matches[match]['token_set_score'] = score
+                if score > all_matches[match]['max_score']:
+                    all_matches[match]['max_score'] = score
+                    all_matches[match]['strategy'] = 'token_set'
         
         # Strategy 4: WRatio (weighted combination of all methods)
-        best_match_4, score_4 = process.extractOne(
-            cleaned_name,
-            org_names,
-            scorer=fuzz.WRatio
-        )
+        matches_4 = process.extract(cleaned_name, org_names, scorer=fuzz.WRatio, limit=top_n)
+        for match, score in matches_4:
+            if match not in all_matches:
+                all_matches[match] = {
+                    'company_name': match,
+                    'max_score': score,
+                    'wratio_score': score,
+                    'strategy': 'WRatio'
+                }
+            else:
+                all_matches[match]['wratio_score'] = score
+                if score > all_matches[match]['max_score']:
+                    all_matches[match]['max_score'] = score
+                    all_matches[match]['strategy'] = 'WRatio'
         
-        # Find the best match across all strategies
-        matches = [
-            (best_match_1, score_1, "token_sort"),
-            (best_match_2, score_2, "partial"),
-            (best_match_3, score_3, "token_set"),
-            (best_match_4, score_4, "WRatio")
+        # Convert to list and filter by threshold
+        candidate_matches = [
+            match_data for match_data in all_matches.values()
+            if match_data['max_score'] >= threshold
         ]
         
-        # Sort by score descending
-        matches.sort(key=lambda x: x[1], reverse=True)
-        best_match, best_score, strategy = matches[0]
+        # Sort by max_score descending
+        candidate_matches.sort(key=lambda x: x['max_score'], reverse=True)
         
-        print(f"[Sponsorship] Best match: '{best_match}' (score: {best_score}%, strategy: {strategy})")
-        print(f"[Sponsorship] All strategies: token_sort={score_1}%, partial={score_2}%, token_set={score_3}%, WRatio={score_4}%")
+        # Take top N
+        top_matches = candidate_matches[:top_n]
         
-        # Use a lower threshold for partial matches (handles "UK" vs "United Kingdom")
-        effective_threshold = threshold
-        if strategy == "partial" and "uk" in cleaned_name.lower() and "united kingdom" in best_match.lower():
-            # Special case: "UK" vs "United Kingdom" should match with lower threshold
-            effective_threshold = max(70, threshold - 10)
-            print(f"[Sponsorship] Using lower threshold ({effective_threshold}%) for UK/United Kingdom match")
+        print(f"[Sponsorship] Found {len(top_matches)} candidate matches above threshold ({threshold}%)")
+        for i, match in enumerate(top_matches, 1):
+            print(f"[Sponsorship]   {i}. {match['company_name']} (score: {match['max_score']}%, strategy: {match['strategy']})")
         
-        if best_score >= effective_threshold:
-            # Get all rows for this company (may have multiple routes)
-            company_rows = df[df['Organisation Name'] == best_match]
+        # Build detailed match info for each candidate
+        result_matches = []
+        for match_data in top_matches:
+            company_name_match = match_data['company_name']
+            company_rows = df[df['Organisation Name'] == company_name_match]
             
             # Aggregate information
             routes = company_rows['Route'].dropna().unique().tolist()
@@ -236,49 +267,267 @@ def find_company_in_csv(company_name: str, df: pd.DataFrame, threshold: int = 80
                 if loc_parts:
                     location_str = "; ".join(set(loc_parts))[:200]
             
-            # Build summary with location information
-            summary_parts = [f"{best_match} is a registered UK visa sponsor."]
-            if routes:
-                summary_parts.append(f"Visa Routes: {', '.join(routes)}.")
-            if types:
-                summary_parts.append(f"Worker Types: {', '.join(types)}.")
-            if location_str:
-                summary_parts.append(f"Location(s): {location_str}.")
-            
-            summary = " ".join(summary_parts)
-            
-            print(f"[Sponsorship] ✓ Match found! Score: {best_score}%")
-            print(f"[Sponsorship] Routes: {', '.join(routes) if routes else 'None'}")
-            print(f"[Sponsorship] Locations: {location_str if location_str else 'None'}")
-            
-            return {
-                'company_name': best_match,
-                'match_score': best_score,
+            result_matches.append({
+                'company_name': company_name_match,
+                'match_score': match_data['max_score'],
+                'strategy': match_data['strategy'],
                 'sponsors_workers': True,
                 'visa_types': ", ".join(routes) if routes else "Not specified",
                 'worker_types': ", ".join(types) if types else "Not specified",
                 'locations': location_str,
                 'total_listings': len(company_rows),
-                'summary': summary
-            }
+                'token_sort_score': match_data.get('token_sort_score', 0),
+                'partial_score': match_data.get('partial_score', 0),
+                'token_set_score': match_data.get('token_set_score', 0),
+                'wratio_score': match_data.get('wratio_score', 0),
+            })
+        
+        return result_matches
+        
     except Exception as e:
         print(f"[Sponsorship] Error in fuzzy matching: {e}")
         import traceback
         print(traceback.format_exc())
-        return None
+        return []
     
-    # If we get here, no match was found
-    print(f"[Sponsorship] ✗ No match found above threshold ({threshold}%)")
+    # If we get here, no matches were found
+    print(f"[Sponsorship] ✗ No matches found above threshold ({threshold}%)")
+    return []
+
+
+def find_company_in_csv(company_name: str, df: pd.DataFrame, threshold: int = 80) -> Optional[Dict[str, Any]]:
+    """
+    Find company in CSV using fuzzy matching with multiple strategies.
+    This is the legacy function that returns a single best match.
+    For better accuracy, use find_multiple_company_matches_in_csv with select_correct_company_match.
+    
+    Args:
+        company_name: Company name to search for
+        df: DataFrame with sponsorship data
+        threshold: Minimum similarity score (0-100) - lowered to 80 for better matching
+        
+    Returns:
+        Dictionary with company info if found, None otherwise
+    """
+    matches = find_multiple_company_matches_in_csv(company_name, df, threshold=threshold, top_n=1)
+    if matches:
+        match = matches[0]
+        # Build summary
+        summary_parts = [f"{match['company_name']} is a registered UK visa sponsor."]
+        if match.get('visa_types') and match['visa_types'] != "Not specified":
+            summary_parts.append(f"Visa Routes: {match['visa_types']}.")
+        if match.get('worker_types') and match['worker_types'] != "Not specified":
+            summary_parts.append(f"Worker Types: {match['worker_types']}.")
+        if match.get('locations'):
+            summary_parts.append(f"Location(s): {match['locations']}.")
+        
+        match['summary'] = " ".join(summary_parts)
+        return match
     return None
 
 
-def check_sponsorship(company_name: Optional[str], job_content: Optional[str] = None) -> Dict[str, Any]:
+def _extract_location_from_job_content(job_content: Optional[str]) -> Optional[str]:
+    """
+    Extract location information from job posting content.
+    
+    Args:
+        job_content: Job posting content text
+        
+    Returns:
+        Extracted location string or None
+    """
+    if not job_content:
+        return None
+    
+    import re
+    
+    # Common location patterns
+    location_patterns = [
+        r'location[:\s]+([A-Z][a-zA-Z\s,]+?)(?:\.|\n|$)',
+        r'based[:\s]+(?:in|at|near)[:\s]+([A-Z][a-zA-Z\s,]+?)(?:\.|\n|$)',
+        r'office[:\s]+(?:in|at|located)[:\s]+([A-Z][a-zA-Z\s,]+?)(?:\.|\n|$)',
+        r'(?:located|situated|headquartered)[:\s]+(?:in|at|near)[:\s]+([A-Z][a-zA-Z\s,]+?)(?:\.|\n|$)',
+        r'(London|Manchester|Birmingham|Leeds|Glasgow|Edinburgh|Liverpool|Bristol|Cardiff|Belfast|Newcastle|Sheffield|Nottingham|Leicester|Coventry|Brighton|Oxford|Cambridge)',
+    ]
+    
+    content_lower = job_content.lower()
+    for pattern in location_patterns:
+        matches = re.finditer(pattern, job_content, re.IGNORECASE)
+        for match in matches:
+            location = match.group(1).strip() if match.groups() else match.group(0).strip()
+            # Clean up location
+            location = re.sub(r'[.,;]$', '', location)  # Remove trailing punctuation
+            location = location[:100]  # Limit length
+            if location and len(location) >= 2:
+                return location
+    
+    return None
+
+
+def select_correct_company_match(
+    job_company_name: str,
+    candidate_matches: List[Dict[str, Any]],
+    job_content: Optional[str] = None,
+    openai_api_key: Optional[str] = None
+) -> Optional[Dict[str, Any]]:
+    """
+    Use a Phidata agent to determine which candidate match is the correct company.
+    Uses location information from both CSV matches and job content to improve accuracy.
+    
+    Args:
+        job_company_name: The company name from the job posting
+        candidate_matches: List of candidate matches from CSV (from find_multiple_company_matches_in_csv)
+        job_content: Optional job posting content for additional context
+        openai_api_key: OpenAI API key (if not provided, will use OPENAI_API_KEY env var)
+        
+    Returns:
+        The selected match dictionary, or None if no match is selected
+    """
+    if not candidate_matches:
+        return None
+    
+    # If only one match, return it (no need for agent)
+    if len(candidate_matches) == 1:
+        print(f"[Sponsorship] Only one candidate match found, using it directly")
+        return candidate_matches[0]
+    
+    try:
+        from phi.agent import Agent
+        from phi.model.openai import OpenAIChat
+        
+        # Get API key
+        api_key = openai_api_key or os.getenv("OPENAI_API_KEY")
+        if not api_key:
+            print(f"[Sponsorship] OpenAI API key not available, using highest scoring match")
+            return candidate_matches[0]  # Fallback to highest score
+        
+        print(f"[Sponsorship] Using AI agent to select correct company from {len(candidate_matches)} candidates")
+        
+        # Extract location from job content
+        job_location = _extract_location_from_job_content(job_content)
+        if job_location:
+            print(f"[Sponsorship] Extracted location from job posting: {job_location}")
+        
+        # Build candidate list for the agent with enhanced location info
+        candidate_list = []
+        for i, match in enumerate(candidate_matches, 1):
+            candidate_info = f"{i}. {match['company_name']} (Match Score: {match['match_score']}%)"
+            
+            # Emphasize location information from CSV
+            if match.get('locations'):
+                candidate_info += f"\n   Location(s): {match['locations']}"
+            
+            if match.get('visa_types') and match['visa_types'] != "Not specified":
+                candidate_info += f"\n   Visa Routes: {match['visa_types']}"
+            
+            if match.get('worker_types') and match['worker_types'] != "Not specified":
+                candidate_info += f"\n   Worker Types: {match['worker_types']}"
+            
+            candidate_list.append(candidate_info)
+        
+        candidates_text = "\n".join(candidate_list)
+        
+        # Build context from job content (first 500 chars to avoid token limits)
+        job_context = ""
+        if job_content:
+            job_context = f"\n\nJob Posting Context (first 500 chars):\n{job_content[:500]}"
+        
+        # Add location context if extracted
+        location_context = ""
+        if job_location:
+            location_context = f"\n\nJob Location: {job_location}\n(Use this to match against candidate company locations from the CSV database)"
+        
+        # Create selection agent
+        selection_agent = Agent(
+            name="Company Match Selector",
+            model=OpenAIChat(id="gpt-4o", api_key=api_key),
+            instructions=[
+                "You are an expert at matching company names. Your task is to determine which candidate company",
+                "from the UK visa sponsorship database is the correct match for the job posting company.",
+                "",
+                "Consider the following factors (in order of importance):",
+                "1. Exact name matches are preferred",
+                "2. Location matching: Match the job location with the candidate company's locations from the CSV database",
+                "   - Location matches are STRONG indicators of correctness",
+                "   - Consider city names, counties, and regions",
+                "   - Even partial location matches can help identify the correct company",
+                "3. Common abbreviations (e.g., 'Ltd' vs 'Limited', 'Inc' vs 'Incorporated')",
+                "4. Company name variations and legal entity suffixes",
+                "5. Industry and business context from the job posting",
+                "",
+                "CRITICAL: Use location information from both the job posting AND the CSV database to help identify",
+                "the correct match. Companies often have specific locations where they operate.",
+                "",
+                "You must respond with ONLY the number (1, 2, 3, etc.) corresponding to the correct match.",
+                "If none of the candidates seem correct, respond with '0'.",
+                "Do not include any explanation, just the number.",
+            ],
+            show_tool_calls=False,
+            markdown=False,
+        )
+        
+        # Build prompt
+        prompt = f"""Given the job posting company name "{job_company_name}", which of these candidate companies from the UK visa sponsorship database is the correct match?
+{location_context}
+Candidates from CSV Database:
+{candidates_text}
+{job_context}
+
+Respond with ONLY the number (1-{len(candidate_matches)}) of the correct match, or 0 if none match."""
+        
+        # Get response
+        response = selection_agent.run(prompt, stream=False)
+        
+        # Extract content from RunResponse
+        response_text = None
+        if hasattr(response, 'content'):
+            response_text = response.content
+            if not isinstance(response_text, str):
+                response_text = str(response_text)
+        elif isinstance(response, str):
+            response_text = response
+        else:
+            response_text = str(response)
+        
+        # Parse the selected number
+        import re
+        match = re.search(r'\b([0-9]+)\b', response_text.strip())
+        if match:
+            selected_num = int(match.group(1))
+            if 1 <= selected_num <= len(candidate_matches):
+                selected_match = candidate_matches[selected_num - 1]
+                print(f"[Sponsorship] ✓ AI agent selected: {selected_match['company_name']} (option {selected_num})")
+                return selected_match
+            elif selected_num == 0:
+                print(f"[Sponsorship] ✗ AI agent determined none of the candidates match")
+                return None
+            else:
+                print(f"[Sponsorship] ⚠️  AI agent returned invalid number ({selected_num}), using highest scoring match")
+                return candidate_matches[0]
+        else:
+            print(f"[Sponsorship] ⚠️  Could not parse AI agent response: {response_text[:100]}, using highest scoring match")
+            return candidate_matches[0]
+            
+    except ImportError as e:
+        print(f"[Sponsorship] Phi agent dependencies not available: {e}, using highest scoring match")
+        return candidate_matches[0]
+    except Exception as e:
+        print(f"[Sponsorship] Error in AI agent selection: {e}")
+        import traceback
+        print(traceback.format_exc())
+        # Fallback to highest scoring match
+        return candidate_matches[0]
+
+
+def check_sponsorship(company_name: Optional[str], job_content: Optional[str] = None, openai_api_key: Optional[str] = None) -> Dict[str, Any]:
     """
     Check if a company sponsors workers by looking it up in the CSV.
+    Uses multiple candidate matches and an AI agent to select the correct company.
     
     Args:
         company_name: Company name (if already extracted)
         job_content: Job posting content (for extraction if company_name not provided)
+        openai_api_key: OpenAI API key for AI agent selection (optional)
         
     Returns:
         Dictionary with sponsorship information
@@ -299,32 +548,53 @@ def check_sponsorship(company_name: Optional[str], job_content: Optional[str] = 
         # Load CSV data
         df = load_sponsorship_data()
         
-        # Search for company (using lower threshold for better matching)
-        match_result = find_company_in_csv(company_name, df, threshold=80)
+        # Find multiple candidate matches (using lower threshold to get more candidates)
+        candidate_matches = find_multiple_company_matches_in_csv(company_name, df, threshold=70, top_n=5)
         
-        if match_result:
-            # Use summary from match_result if available, otherwise build one
-            summary = match_result.get('summary')
-            if not summary:
-                summary_parts = [
-                    f"{match_result['company_name']} is a registered UK visa sponsor.",
-                    f"Worker Types: {match_result['worker_types']}",
-                    f"Visa Routes: {match_result['visa_types']}",
-                ]
-                if match_result.get('locations'):
-                    summary_parts.append(f"Locations: {match_result['locations']}")
-                summary_parts.append(f"Total active listings: {match_result['total_listings']}")
-                summary = " ".join(summary_parts)
+        if candidate_matches:
+            # Use AI agent to select the correct match
+            selected_match = select_correct_company_match(
+                company_name,
+                candidate_matches,
+                job_content,
+                openai_api_key
+            )
             
-            return {
-                'company_name': match_result['company_name'],
-                'sponsors_workers': True,
-                'visa_types': match_result['visa_types'],
-                'summary': summary,
-                'found_in_csv': True
-            }
+            if selected_match:
+                # Build summary
+                summary_parts = [f"{selected_match['company_name']} is a registered UK visa sponsor."]
+                if selected_match.get('visa_types') and selected_match['visa_types'] != "Not specified":
+                    summary_parts.append(f"Visa Routes: {selected_match['visa_types']}.")
+                if selected_match.get('worker_types') and selected_match['worker_types'] != "Not specified":
+                    summary_parts.append(f"Worker Types: {selected_match['worker_types']}.")
+                if selected_match.get('locations'):
+                    summary_parts.append(f"Location(s): {selected_match['locations']}.")
+                summary_parts.append(f"Total active listings: {selected_match['total_listings']}.")
+                
+                summary = " ".join(summary_parts)
+                
+                print(f"[Sponsorship] ✓ Final selected match: {selected_match['company_name']} (score: {selected_match['match_score']}%)")
+                
+                return {
+                    'company_name': selected_match['company_name'],
+                    'sponsors_workers': True,
+                    'visa_types': selected_match['visa_types'],
+                    'summary': summary,
+                    'found_in_csv': True
+                }
+            else:
+                # Agent determined none of the candidates match
+                print(f"[Sponsorship] ✗ AI agent determined none of the {len(candidate_matches)} candidates are correct")
+                return {
+                    'company_name': company_name,
+                    'sponsors_workers': False,
+                    'visa_types': None,
+                    'summary': f"{company_name} was not found in the UK visa sponsorship database. The AI agent reviewed {len(candidate_matches)} similar company names but determined none match. This may mean they do not currently sponsor workers, or the company name does not match exactly.",
+                    'found_in_csv': False
+                }
         else:
-            # Company not found in CSV - return with flag indicating we should fetch web info
+            # No candidate matches found in CSV
+            print(f"[Sponsorship] ✗ No candidate matches found above threshold")
             return {
                 'company_name': company_name,
                 'sponsors_workers': False,
@@ -342,6 +612,8 @@ def check_sponsorship(company_name: Optional[str], job_content: Optional[str] = 
         }
     except Exception as e:
         print(f"[Sponsorship] Error checking sponsorship: {e}")
+        import traceback
+        print(traceback.format_exc())
         return {
             'company_name': company_name or "Unknown",
             'sponsors_workers': False,

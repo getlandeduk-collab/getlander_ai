@@ -91,7 +91,8 @@ class MatchedJob(BaseModel):
     key_matches: List[str] = Field(default_factory=list)
     requirements_met: int = 0
     total_requirements: int = 0
-    scraped_summary: Optional[str] = None  # Brief summary of scraped content
+    location: Optional[str] = None  # Job location extracted from description
+    scraped_summary: Optional[str] = None  # Brief summary of scraped content (deprecated, kept for backward compatibility)
 
 
 class SponsorshipInfo(BaseModel):
