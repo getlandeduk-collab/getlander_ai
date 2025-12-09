@@ -91,6 +91,18 @@ class MatchedJob(BaseModel):
     key_matches: List[str] = Field(default_factory=list)
     requirements_met: int = 0
     total_requirements: int = 0
+    requirements_satisfied: List[str] = Field(
+        default_factory=list,
+        description="List of specific requirements/skills that the candidate matches (e.g., 'Java', 'React', 'AWS')"
+    )
+    requirements_missing: List[str] = Field(
+        default_factory=list,
+        description="List of specific requirements/skills that the candidate does not match (e.g., 'Kubernetes', 'Docker')"
+    )
+    improvements_needed: List[str] = Field(
+        default_factory=list,
+        description="Specific improvements or skills the candidate should work on to better match this job"
+    )
     location: Optional[str] = None  # Job location extracted from description
     scraped_summary: Optional[str] = None  # Brief summary of scraped content (deprecated, kept for backward compatibility)
 

@@ -608,16 +608,27 @@ def is_valid_company_name(name: str) -> bool:
     if len(name) > 80:
         return False
     
-    # Reject invalid company name words
+    # Reject invalid company name words (expanded list)
     invalid_company_words = [
         'hirer', 'employer', 'recruiter', 'hiring', 'company', 'organization', 'organisation',
         'the', 'and', 'for', 'with', 'that', 'this', 'from', 'into', 'by', 
-        'leveraging', 'transforming', 'using', 'through', 'description', 'about'
+        'leveraging', 'transforming', 'using', 'through', 'description', 'about',
+        'job', 'position', 'role', 'opportunity', 'career', 'work', 'employment',
+        'posting', 'listing', 'advertisement', 'ad', 'vacancy', 'opening',
+        'applicant', 'candidate', 'worker', 'employee', 'staff', 'personnel'
     ]
     name_lower = name.lower().strip()
     # Reject if the entire name is just an invalid word
     if name_lower in invalid_company_words:
         return False
+    
+    # Reject if it contains invalid words (even as part of the name) - strict check for common false positives
+    for invalid_word in ['hirer', 'employer', 'recruiter', 'hiring']:
+        # Match whole words only, and reject if it's a short name containing these
+        if re.search(r'\b' + re.escape(invalid_word) + r'\b', name_lower):
+            # Reject if it's a short name (likely false positive)
+            if len(name_lower.split()) <= 2:
+                return False
     
     # Reject if it contains too many common words (likely description)
     common_words = ['the', 'and', 'for', 'with', 'that', 'this', 'from', 'into', 'by', 'leveraging', 'transforming', 'using', 'through']
@@ -637,6 +648,14 @@ def is_valid_company_name(name: str) -> bool:
     for pattern in verb_patterns:
         if re.search(pattern, name.lower()):
             return False
+    
+    # Require at least one capital letter (proper noun indicator)
+    if not any(c.isupper() for c in name):
+        return False
+    
+    # Reject if it's a sentence fragment (contains sentence-ending punctuation)
+    if re.search(r'[.!?]\s*$', name):
+        return False
     
     return True
 
@@ -3126,13 +3145,9 @@ Extract every skill, tool, and technology mentioned. Calculate total years from 
 
 Analyze the match between candidate and job. Consider ALL requirements from the job description.
 
-
-
 Candidate Profile:
 
 {json.dumps(candidate_profile.dict(), indent=2)}
-
-
 
 Job Details:
 
@@ -3144,8 +3159,6 @@ Job Details:
 
 - Description: {job.description[:2000]}
 
-
-
 CRITICAL: Read the job description carefully. If this is a:
 
 - Billing/Finance role: Score based on financial/accounting skills
@@ -3154,25 +3167,62 @@ CRITICAL: Read the job description carefully. If this is a:
 
 - Sales/Marketing role: Score based on communication/business skills
 
-
-
-Return ONLY valid JSON (no markdown) with:
+Return ONLY valid JSON (no markdown) with the following structure:
 
 {{
-
   "match_score": 0.75,
-
   "key_matches": ["skill1", "skill2"],
-
   "requirements_met": 5,
-
   "total_requirements": 8,
-
+  "requirements_satisfied": [
+    "Java (candidate has 3 years experience)",
+    "React (candidate has strong frontend experience)",
+    "AWS (candidate has cloud experience)"
+  ],
+  "requirements_missing": [
+    "Kubernetes (not mentioned in candidate profile)",
+    "Docker (not mentioned in candidate profile)",
+    "5+ years experience (candidate has 3 years)"
+  ],
+  "improvements_needed": [
+    "Gain experience with containerization tools (Docker, Kubernetes)",
+    "Build 2 more years of experience to meet the 5+ years requirement",
+    "Learn CI/CD pipeline tools (Jenkins, GitLab CI)"
+  ],
   "reasoning": "Brief explanation of score"
-
 }}
 
+IMPORTANT INSTRUCTIONS:
 
+1. **requirements_satisfied**: List ALL specific requirements/skills from the job that the candidate MATCHES.
+   - Include the requirement name and brief context (e.g., "Java (candidate has 3 years experience)")
+   - Be specific: "Java, Spring Boot" not just "Java"
+   - Include experience matches: "5+ years (candidate has 4 years)" if close
+   - Include technology matches: "React (candidate has strong frontend experience)"
+   - Include soft skills if mentioned: "Team leadership (candidate has managed teams)"
+
+2. **requirements_missing**: List ALL specific requirements/skills from the job that the candidate DOES NOT MATCH.
+   - Include the requirement name and why it's missing (e.g., "Kubernetes (not mentioned in candidate profile)")
+   - Be specific about what's missing
+   - Include experience gaps: "5+ years experience (candidate has 3 years)"
+   - Include missing technologies, tools, certifications, etc.
+
+3. **improvements_needed**: List SPECIFIC, ACTIONABLE improvements the candidate should work on.
+   - Focus on the most important missing requirements
+   - Be specific: "Learn Docker and Kubernetes" not just "Learn containerization"
+   - Include experience gaps: "Gain 2 more years of experience"
+   - Prioritize improvements that would have the biggest impact on match score
+   - Keep it practical and achievable
+
+4. **requirements_met** and **total_requirements**: Count the number of requirements satisfied vs total requirements.
+   - Count each distinct requirement (skill, tool, experience level, certification, etc.)
+   - Be generous but accurate - count related skills as matches if the candidate has similar experience
+
+5. **match_score**: Calculate based on:
+   - Percentage of requirements satisfied
+   - Importance of satisfied/missing requirements
+   - Experience level match
+   - Overall fit quality
 
 Be strict with scoring:
 
@@ -3256,6 +3306,12 @@ Be strict with scoring:
 
                     "total_requirements": int(data.get("total_requirements", 1)),
 
+                    "requirements_satisfied": data.get("requirements_satisfied", []) or [],
+
+                    "requirements_missing": data.get("requirements_missing", []) or [],
+
+                    "improvements_needed": data.get("improvements_needed", []) or [],
+
                     "reasoning": data.get("reasoning", "Score calculated based on candidate-job alignment"),
 
                 }
@@ -3268,19 +3324,31 @@ Be strict with scoring:
 
 
 
-        # Score sequentially to avoid rate limits
-
+        # Score jobs in parallel with semaphore for rate limiting
+        scoring_semaphore = asyncio.Semaphore(5)  # Allow up to 5 concurrent scoring operations
+        
+        async def score_job_async(job: JobPosting) -> Optional[Dict[str, Any]]:
+            """Score a single job asynchronously with rate limiting."""
+            async with scoring_semaphore:
+                # Run the synchronous scoring function in a thread pool
+                result = await asyncio.to_thread(score_job_sync, job)
+                # Small delay to avoid overwhelming the API
+                await asyncio.sleep(0.1)
+                return result
+        
+        # Score all jobs in parallel
+        print(f"[SCORING] Starting parallel scoring for {len(jobs)} jobs...")
+        scoring_tasks = [score_job_async(job) for job in jobs]
+        scoring_results = await asyncio.gather(*scoring_tasks, return_exceptions=True)
+        
+        # Filter out exceptions and None results
         scored = []
-
-        for job in jobs:
-
-            result = score_job_sync(job)
-
+        for result in scoring_results:
+            if isinstance(result, Exception):
+                print(f"❌ Error in parallel scoring: {result}")
+                continue
             if result:
-
                 scored.append(result)
-
-            await asyncio.sleep(0.5)  # Rate limit protection
 
 
 
@@ -3338,29 +3406,31 @@ Be strict with scoring:
 
 Write a 150-200 word unique summary for this job-candidate match.
 
-
-
 Candidate: {candidate_profile.name}
 
 - Skills: {', '.join(candidate_profile.skills[:10])}
 
 - Experience: {candidate_profile.total_years_experience} years
 
-
-
 Job: {job.job_title} at {job.company}
 
 Match Score: {score:.1%}
 
+Requirements Match: {entry.get("requirements_met", 0)} out of {entry.get("total_requirements", 1)} requirements satisfied
+
+Requirements Satisfied: {', '.join(entry.get("requirements_satisfied", [])[:5]) if entry.get("requirements_satisfied") else "None specified"}
+
+Requirements Missing: {', '.join(entry.get("requirements_missing", [])[:5]) if entry.get("requirements_missing") else "None specified"}
+
 Description: {job.description[:1500]}
-
-
 
 Explain:
 
 - Why this is {'a strong' if score >= 0.7 else 'a good' if score >= 0.5 else 'a weak'} match
 
-- Specific skills/experience that align
+- Specific skills/experience that align (mention key requirements satisfied)
+
+- Key gaps or areas for improvement (mention important missing requirements)
 
 - Growth opportunities
 
@@ -3588,6 +3658,12 @@ Be honest about the fit level based on the score.
 
                 total_requirements=entry["total_requirements"],
 
+                requirements_satisfied=entry.get("requirements_satisfied", []) or [],
+
+                requirements_missing=entry.get("requirements_missing", []) or [],
+
+                improvements_needed=entry.get("improvements_needed", []) or [],
+
                 location=location,
 
                 scraped_summary=None,  # Remove duplicate - summary field contains all needed info
@@ -3596,17 +3672,25 @@ Be honest about the fit level based on the score.
 
 
 
-        # Generate summaries sequentially
-
-        matched_jobs = []
-
-        for i, entry in enumerate(top_matches):
-
-            result = summarize_sync(entry, i + 1)
-
-            matched_jobs.append(result)
-
-            await asyncio.sleep(0.5)
+        # Generate summaries in parallel with semaphore for rate limiting
+        summarization_semaphore = asyncio.Semaphore(3)  # Allow up to 3 concurrent summarizations
+        
+        async def summarize_async(entry: Dict[str, Any], rank: int) -> MatchedJob:
+            """Generate summary for a matched job asynchronously with rate limiting."""
+            async with summarization_semaphore:
+                # Run the synchronous summarization function in a thread pool
+                result = await asyncio.to_thread(summarize_sync, entry, rank)
+                # Small delay to avoid overwhelming the API
+                await asyncio.sleep(0.1)
+                return result
+        
+        # Generate summaries in parallel
+        print(f"[SUMMARIZATION] Starting parallel summarization for {len(top_matches)} jobs...")
+        summarization_tasks = [summarize_async(entry, i + 1) for i, entry in enumerate(top_matches)]
+        matched_jobs = await asyncio.gather(*summarization_tasks, return_exceptions=True)
+        
+        # Filter out exceptions
+        matched_jobs = [job for job in matched_jobs if not isinstance(job, Exception)]
 
 
 
@@ -3812,145 +3896,193 @@ Be honest about the fit level based on the score.
 
 
 
-        # STEP 6: Check Sponsorship
+        # STEP 6: Check Sponsorship (in parallel for all matched jobs)
         print("\n" + "="*80)
         print("🔍 SPONSORSHIP CHECKER - Checking company sponsorship status")
         print("="*80)
         
         sponsorship_info = None
         if matched_jobs:
-            # Get company name from the top matched job
-            top_job = matched_jobs[0]
-            company_name = top_job.company
+            # Check sponsorship for all matched jobs in parallel
+            sponsorship_semaphore = asyncio.Semaphore(3)  # Allow up to 3 concurrent sponsorship checks
             
-            # Clean company name using our cleaning function
-            company_name = clean_company_name(company_name)
-            
-            # Get job content for extraction if needed
-            # Try from scraped_summary first, then from summary, then from cache
-            job_content = top_job.scraped_summary or top_job.summary or ""
-            
-            # If company name is a fallback message, try to extract from job content
-            if not company_name or company_name == "Company name not available in posting":
-                if job_content:
-                    company_name = extract_company_name_from_content(job_content, company_name)
-            if not job_content and top_job.job_url:
-                cached_data = SCRAPE_CACHE.get(str(top_job.job_url), {})
-                job_content = cached_data.get('description') or cached_data.get('scraped_summary') or cached_data.get('text_content') or ""
-            
-            try:
-                from sponsorship_checker import check_sponsorship, get_company_info_from_web
-                
-                # Get OpenAI API key for agent-based company matching
-                openai_key = settings.openai_api_key or os.getenv("OPENAI_API_KEY")
-                
-                print(f"[Sponsorship] Checking company: {company_name}")
-                sponsorship_result = check_sponsorship(company_name, job_content, openai_key)
-                
-                # Get company info from web using Phi agent
-                company_info_summary = None
-                matched_company_name = sponsorship_result.get('company_name') or company_name
-                if matched_company_name and matched_company_name.lower() not in ["unknown", "not specified", "none", ""]:
+            async def check_sponsorship_async(job: MatchedJob) -> Optional[Dict[str, Any]]:
+                """Check sponsorship for a single job asynchronously."""
+                async with sponsorship_semaphore:
                     try:
-                        # Get OpenAI API key from settings
+                        from sponsorship_checker import check_sponsorship, get_company_info_from_web
+                        
+                        # Get company name from the job
+                        company_name = job.company
+                        
+                        # Clean company name using our cleaning function
+                        company_name = clean_company_name(company_name)
+                        
+                        # Get job content for extraction if needed
+                        # Try from scraped_summary first, then from summary, then from cache
+                        job_content = job.scraped_summary or job.summary or ""
+                        
+                        # If company name is a fallback message or invalid, try to extract from job content
+                        if not company_name or company_name == "Company name not available in posting" or not is_valid_company_name(company_name):
+                            if job_content:
+                                company_name = extract_company_name_from_content(job_content, company_name)
+                        if not job_content and job.job_url:
+                            cached_data = SCRAPE_CACHE.get(str(job.job_url), {})
+                            job_content = cached_data.get('description') or cached_data.get('scraped_summary') or cached_data.get('text_content') or ""
+                        
+                        # Validate company name before checking
+                        if not company_name or not is_valid_company_name(company_name):
+                            print(f"[Sponsorship] Invalid company name '{company_name}', skipping check")
+                            return None
+                        
+                        # Get OpenAI API key for agent-based company matching
                         openai_key = settings.openai_api_key or os.getenv("OPENAI_API_KEY")
-                        if openai_key:
-                            print(f"[Sponsorship] Fetching additional company information from web...")
-                            company_info_summary = get_company_info_from_web(matched_company_name, openai_key)
-                        else:
-                            print(f"[Sponsorship] OpenAI API key not available, skipping web search")
-                    except Exception as e:
-                        print(f"[Sponsorship] Error fetching company info from web: {e}")
-                        # Continue without web info - not critical
-                
-                # Build enhanced summary (ensure consistent plain text formatting)
-                base_summary = sponsorship_result.get('summary', 'No sponsorship information available')
-                # Clean and normalize the base summary
-                base_summary = clean_summary_text(base_summary)
-                enhanced_summary = base_summary
-                
-                if company_info_summary:
-                    # Clean company info
-                    company_info_cleaned = clean_summary_text(company_info_summary)
-                    
-                    # Remove redundant visa sponsorship information from company info
-                    # (since we already have it confirmed from CSV)
-                    sponsors_workers = sponsorship_result.get('sponsors_workers', False)
-                    if sponsors_workers:
-                        # Split into sentences and filter out redundant ones about visa sponsorship
-                        sentences = re.split(r'[.!?]+', company_info_cleaned)
-                        filtered_sentences = []
                         
-                        for sentence in sentences:
-                            sentence = sentence.strip()
-                            if not sentence or len(sentence) < 10:
-                                continue
-                            
-                            sentence_lower = sentence.lower()
-                            
-                            # Skip sentences about visa sponsorship that are uncertain/redundant
-                            # since we already have confirmed info from CSV
-                            if any(phrase in sentence_lower for phrase in ['visa sponsorship', 'visa sponsor', 'visa not', 'visa information']):
-                                # If it mentions uncertainty or suggests contacting, skip it
-                                if any(uncertain_phrase in sentence_lower for uncertain_phrase in [
-                                    'not found', 'was not found', 'not available', 'uncertain',
-                                    'potentially', 'generally', 'might', 'may', 'could', 'contact',
-                                    'check', 'definitive information', 'advisable', 'check their',
-                                    'hr department', 'official careers', 'cannot be filled'
-                                ]):
-                                    continue  # Skip this redundant sentence
-                            
-                            filtered_sentences.append(sentence)
+                        print(f"[Sponsorship] Checking company: {company_name}")
+                        # Run in thread pool since check_sponsorship is synchronous
+                        sponsorship_result = await asyncio.to_thread(check_sponsorship, company_name, job_content, openai_key)
                         
-                        # Rejoin sentences
-                        company_info_cleaned = '. '.join(filtered_sentences)
-                        if company_info_cleaned and not company_info_cleaned.endswith(('.', '!', '?')):
-                            company_info_cleaned += '.'
-                        company_info_cleaned = re.sub(r'\s+', ' ', company_info_cleaned).strip()
-                    
-                    # Only append company info if there's substantial unique content
-                    # (avoid repeating what's already in base_summary)
-                    if company_info_cleaned and len(company_info_cleaned.strip()) > 30:
-                        # Check for overlap with base_summary to avoid duplication
-                        if base_summary:
-                            base_lower = base_summary.lower()
-                            company_lower = company_info_cleaned.lower()
-                            
-                            # Simple overlap check - if too similar, skip
-                            # Count common significant words (longer than 4 chars)
-                            base_words = {w for w in base_lower.split() if len(w) > 4}
-                            company_words = {w for w in company_lower.split() if len(w) > 4}
-                            common_words = base_words & company_words
-                            
-                            # If more than 40% overlap in significant content, don't duplicate
-                            if len(common_words) > 0 and len(common_words) / max(len(company_words), 1) > 0.4:
-                                # Just use base summary to avoid repetition
-                                enhanced_summary = base_summary
-                            else:
-                                # Add unique company information
-                                enhanced_summary = f"{base_summary}. {company_info_cleaned}"
-                        else:
-                            enhanced_summary = company_info_cleaned
-                    else:
-                        # Not enough content, just use base summary
+                        # Get company info from web using Phi agent (optional, can be slow)
+                        company_info_summary = None
+                        matched_company_name = sponsorship_result.get('company_name') or company_name
+                        if matched_company_name and matched_company_name.lower() not in ["unknown", "not specified", "none", ""]:
+                            try:
+                                if openai_key:
+                                    print(f"[Sponsorship] Fetching additional company information from web for {matched_company_name}...")
+                                    # Run in thread pool since get_company_info_from_web is synchronous
+                                    company_info_summary = await asyncio.to_thread(get_company_info_from_web, matched_company_name, openai_key)
+                                else:
+                                    print(f"[Sponsorship] OpenAI API key not available, skipping web search")
+                            except Exception as e:
+                                print(f"[Sponsorship] Error fetching company info from web: {e}")
+                                # Continue without web info - not critical
+                        
+                        # Build enhanced summary
+                        base_summary = sponsorship_result.get('summary', 'No sponsorship information available')
+                        base_summary = clean_summary_text(base_summary)
                         enhanced_summary = base_summary
+                        
+                        if company_info_summary:
+                            # Clean company info
+                            company_info_cleaned = clean_summary_text(company_info_summary)
+                            
+                            # Remove redundant visa sponsorship information from company info
+                            sponsors_workers = sponsorship_result.get('sponsors_workers', False)
+                            if sponsors_workers:
+                                # Split into sentences and filter out redundant ones
+                                sentences = re.split(r'[.!?]+', company_info_cleaned)
+                                filtered_sentences = []
+                                
+                                for sentence in sentences:
+                                    sentence = sentence.strip()
+                                    if not sentence or len(sentence) < 10:
+                                        continue
+                                    
+                                    sentence_lower = sentence.lower()
+                                    
+                                    # Skip sentences about visa sponsorship that are uncertain/redundant
+                                    if any(phrase in sentence_lower for phrase in ['visa sponsorship', 'visa sponsor', 'visa not', 'visa information']):
+                                        if any(uncertain_phrase in sentence_lower for uncertain_phrase in [
+                                            'not found', 'was not found', 'not available', 'uncertain',
+                                            'potentially', 'generally', 'might', 'may', 'could', 'contact',
+                                            'check', 'definitive information', 'advisable', 'check their',
+                                            'hr department', 'official careers', 'cannot be filled'
+                                        ]):
+                                            continue
+                                    
+                                    filtered_sentences.append(sentence)
+                                
+                                # Rejoin sentences
+                                company_info_cleaned = '. '.join(filtered_sentences)
+                                if company_info_cleaned and not company_info_cleaned.endswith(('.', '!', '?')):
+                                    company_info_cleaned += '.'
+                                company_info_cleaned = re.sub(r'\s+', ' ', company_info_cleaned).strip()
+                            
+                            # Only append company info if there's substantial unique content
+                            if company_info_cleaned and len(company_info_cleaned.strip()) > 30:
+                                if base_summary:
+                                    base_lower = base_summary.lower()
+                                    company_lower = company_info_cleaned.lower()
+                                    
+                                    # Simple overlap check
+                                    base_words = {w for w in base_lower.split() if len(w) > 4}
+                                    company_words = {w for w in company_lower.split() if len(w) > 4}
+                                    common_words = base_words & company_words
+                                    
+                                    if len(common_words) > 0 and len(common_words) / max(len(company_words), 1) > 0.4:
+                                        enhanced_summary = base_summary
+                                    else:
+                                        enhanced_summary = f"{base_summary}. {company_info_cleaned}"
+                                else:
+                                    enhanced_summary = company_info_cleaned
+                            else:
+                                enhanced_summary = base_summary
+                            
+                            # Normalize whitespace
+                            enhanced_summary = re.sub(r'\s+', ' ', enhanced_summary)
+                            enhanced_summary = re.sub(r'\.\s*\.', '.', enhanced_summary)
+                            enhanced_summary = enhanced_summary.strip()
+                            print(f"[Sponsorship] Enhanced summary with company information from web")
+                        
+                        return {
+                            'company_name': sponsorship_result.get('company_name'),
+                            'sponsors_workers': sponsorship_result.get('sponsors_workers', False),
+                            'visa_types': sponsorship_result.get('visa_types'),
+                            'summary': enhanced_summary,
+                            'job': job
+                        }
+                    except Exception as e:
+                        print(f"[Sponsorship] Error checking sponsorship for {job.company}: {e}")
+                        import traceback
+                        print(traceback.format_exc())
+                        return None
+            
+            # Check sponsorship for all matched jobs in parallel
+            print(f"[Sponsorship] Checking sponsorship for {len(matched_jobs)} jobs in parallel...")
+            sponsorship_tasks = [check_sponsorship_async(job) for job in matched_jobs]
+            sponsorship_results = await asyncio.gather(*sponsorship_tasks, return_exceptions=True)
+            
+            # Filter out exceptions and None results
+            valid_sponsorship_results = [r for r in sponsorship_results if r and not isinstance(r, Exception)]
+            
+            if valid_sponsorship_results:
+                # Match results to jobs and prioritize the top job's result
+                # Create a mapping of job URL to sponsorship result
+                sponsorship_by_job = {}
+                for result in valid_sponsorship_results:
+                    job = result.get('job')
+                    if job and job.job_url:
+                        sponsorship_by_job[str(job.job_url)] = result
+                
+                # Try to get the top job's sponsorship result
+                sponsorship_result = None
+                if matched_jobs and len(matched_jobs) > 0:
+                    top_job_url = str(matched_jobs[0].job_url)
+                    if top_job_url in sponsorship_by_job:
+                        sponsorship_result = sponsorship_by_job[top_job_url]
+                        print(f"[Sponsorship] Using sponsorship result from top job: {matched_jobs[0].company}")
+                
+                # Fallback to first valid result if top job's result not found
+                if not sponsorship_result:
+                    sponsorship_result = valid_sponsorship_results[0]
+                    print(f"[Sponsorship] Using first available sponsorship result")
+                
+                try:
+                    from models import SponsorshipInfo
                     
-                    # Normalize whitespace and remove duplicate periods
-                    enhanced_summary = re.sub(r'\s+', ' ', enhanced_summary)
-                    enhanced_summary = re.sub(r'\.\s*\.', '.', enhanced_summary)  # Remove double periods
-                    enhanced_summary = enhanced_summary.strip()
-                    print(f"[Sponsorship] Enhanced summary with company information from web (removed redundant visa sponsorship info)")
-                
-                sponsorship_info = SponsorshipInfo(
-                    company_name=sponsorship_result.get('company_name'),
-                    sponsors_workers=sponsorship_result.get('sponsors_workers', False),
-                    visa_types=sponsorship_result.get('visa_types'),
-                    summary=enhanced_summary
-                )
-                
-                print(f"[Sponsorship] Result: {'✓ Sponsors workers' if sponsorship_info.sponsors_workers else '✗ Does not sponsor workers'}")
-                if sponsorship_info.visa_types:
-                    print(f"[Sponsorship] Visa types: {sponsorship_info.visa_types}")
+                    sponsorship_info = SponsorshipInfo(
+                        company_name=sponsorship_result.get('company_name'),
+                        sponsors_workers=sponsorship_result.get('sponsors_workers', False),
+                        visa_types=sponsorship_result.get('visa_types'),
+                        summary=sponsorship_result.get('summary')
+                    )
+                    
+                    print(f"[Sponsorship] Result: {'✓ Sponsors workers' if sponsorship_info.sponsors_workers else '✗ Does not sponsor workers'}")
+                    if sponsorship_info.visa_types:
+                        print(f"[Sponsorship] Visa types: {sponsorship_info.visa_types}")
+                except Exception as e:
+                    print(f"[Sponsorship] Error creating SponsorshipInfo: {e}")
+                    sponsorship_info = None
                 
                 # Update matched job summary to reflect actual sponsorship info (remove "No mention..." text)
                 if matched_jobs and len(matched_jobs) > 0:

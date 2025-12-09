@@ -235,11 +235,32 @@ def find_multiple_company_matches_in_csv(company_name: str, df: pd.DataFrame, th
             if match_data['max_score'] >= threshold
         ]
         
+        # Additional validation: Reject matches where input is too short and match seems suspicious
+        # This prevents "hirer" from matching "HireRight Limited" with 100% partial ratio
+        validated_matches = []
+        for match_data in candidate_matches:
+            input_len = len(cleaned_name)
+            match_name = match_data['company_name']
+            match_score = match_data['max_score']
+            
+            # If input is very short (< 5 chars) and match score is from partial ratio,
+            # require a higher threshold to prevent false positives
+            if input_len < 5 and match_data.get('strategy') == 'partial':
+                # For very short inputs, require at least 85% match and the input should be
+                # a significant portion of the match name
+                if match_score >= 85:
+                    # Check if input is at least 30% of match name length (to avoid "hirer" -> "HireRight Limited")
+                    if input_len >= len(match_name) * 0.3:
+                        validated_matches.append(match_data)
+                # Otherwise reject
+            else:
+                validated_matches.append(match_data)
+        
         # Sort by max_score descending
-        candidate_matches.sort(key=lambda x: x['max_score'], reverse=True)
+        validated_matches.sort(key=lambda x: x['max_score'], reverse=True)
         
         # Take top N
-        top_matches = candidate_matches[:top_n]
+        top_matches = validated_matches[:top_n]
         
         print(f"[Sponsorship] Found {len(top_matches)} candidate matches above threshold ({threshold}%)")
         for i, match in enumerate(top_matches, 1):

@@ -392,14 +392,15 @@ class FirebaseService:
         """
         Save a job application to Firestore.
         Uses the EXACT same approach as test_firebase_simple.py
-        Checks for duplicates before saving.
+        Checks for duplicates before saving. If a duplicate is found, the existing
+        document is updated with the latest data (preserving original createdAt).
         
         Args:
             user_id: The user ID
             job_data: Dictionary containing job application data
             
         Returns:
-            The document ID of the saved application (or existing duplicate)
+            The document ID of the saved/updated application
         """
         try:
             print(f"\n{'='*70}")
@@ -439,21 +440,12 @@ class FirebaseService:
             # Check for duplicates before saving
             print(f"[Firebase] [DUPLICATE] Checking for duplicate job application...")
             existing_doc_id = self._check_job_application_duplicate(user_id, job_data)
-            if existing_doc_id:
-                print(f"[Firebase] [DUPLICATE] ✓ Duplicate found, skipping save. Existing document ID: {existing_doc_id}")
-                print(f"[Firebase] [DUPLICATE] Path: users/{user_id}/job_applications/{existing_doc_id}")
-                print(f"{'='*70}\n")
-                return existing_doc_id
-            
-            print(f"[Firebase] [DUPLICATE] No duplicate found, proceeding with save...")
-            print(f"[Firebase] [INFO] Saving job application for user: {user_id}")
             
             # Prepare document data with defaults
             # Use datetime.now() directly EXACTLY like test_firebase_simple.py (lines 88-98)
             document_data = {
                 "appliedDate": job_data.get("appliedDate", datetime.now()),
                 "company": job_data.get("company", ""),
-                "createdAt": datetime.now(),  # EXACT same as test script line 90
                 "interviewDate": job_data.get("interviewDate", ""),
                 "jobDescription": job_data.get("jobDescription", ""),
                 "link": job_data.get("link", ""),
@@ -463,6 +455,43 @@ class FirebaseService:
                 "status": job_data.get("status", "Applied"),
                 "visaRequired": job_data.get("visaRequired", "No")
             }
+            
+            if existing_doc_id:
+                # Duplicate found - update the existing document with latest data
+                print(f"[Firebase] [DUPLICATE] ✓ Duplicate found, updating existing document. Existing document ID: {existing_doc_id}")
+                print(f"[Firebase] [DUPLICATE] Path: users/{user_id}/job_applications/{existing_doc_id}")
+                
+                # Get reference to existing document
+                collection_ref = db.collection("users").document(user_id).collection("job_applications")
+                doc_ref = collection_ref.document(existing_doc_id)
+                
+                # Get existing document to preserve createdAt if it exists
+                existing_doc = doc_ref.get()
+                if existing_doc.exists:
+                    existing_data = existing_doc.to_dict()
+                    # Preserve original createdAt, add updatedAt
+                    if "createdAt" in existing_data:
+                        document_data["createdAt"] = existing_data["createdAt"]
+                    else:
+                        document_data["createdAt"] = datetime.now()
+                    document_data["updatedAt"] = datetime.now()
+                    print(f"[Firebase] [UPDATE] Preserving original createdAt: {existing_data.get('createdAt')}")
+                else:
+                    # Document doesn't exist (shouldn't happen, but handle gracefully)
+                    document_data["createdAt"] = datetime.now()
+                    document_data["updatedAt"] = datetime.now()
+                
+                # Update the existing document with latest data
+                doc_ref.update(document_data)
+                print(f"[Firebase] [UPDATE] ✓ Successfully updated existing document with latest data")
+                print(f"{'='*70}\n")
+                return existing_doc_id
+            
+            print(f"[Firebase] [DUPLICATE] No duplicate found, proceeding with new save...")
+            print(f"[Firebase] [INFO] Saving new job application for user: {user_id}")
+            
+            # Add createdAt for new documents
+            document_data["createdAt"] = datetime.now()
             
             print(f"[Firebase] [DEBUG] Document data prepared:")
             print(f"  Company: {document_data['company']}")
@@ -531,14 +560,14 @@ class FirebaseService:
     def save_job_applications_batch(self, user_id: str, jobs_data: List[Dict[str, Any]]) -> List[str]:
         """
         Save multiple job applications to Firestore in a batch.
-        Duplicates are automatically skipped (existing document IDs are returned).
+        Duplicates are automatically replaced with the latest data (existing documents are updated).
         
         Args:
             user_id: The user ID
             jobs_data: List of dictionaries containing job application data
             
         Returns:
-            List of document IDs of saved applications (includes existing duplicates)
+            List of document IDs of saved/updated applications
         """
         try:
             print(f"[Firebase] [BATCH] Starting batch save for {len(jobs_data)} job applications...")
@@ -552,14 +581,16 @@ class FirebaseService:
                     # Check if this is a duplicate before attempting save
                     existing_doc_id = self._check_job_application_duplicate(user_id, job_data)
                     if existing_doc_id:
-                        document_ids.append(existing_doc_id)
+                        # Duplicate found - update existing document with latest data
+                        doc_id = self.save_job_application(user_id, job_data)
+                        document_ids.append(doc_id)
                         duplicates_count += 1
-                        print(f"[Firebase] [BATCH] ⚠️  Duplicate found for job {idx}, skipping save. Existing ID: {existing_doc_id}")
+                        print(f"[Firebase] [BATCH] ✓ Duplicate found for job {idx}, updated existing document. ID: {existing_doc_id}")
                     else:
                         doc_id = self.save_job_application(user_id, job_data)
                         document_ids.append(doc_id)
                         new_count += 1
-                        print(f"[Firebase] [BATCH] ✓ Successfully saved job {idx} with ID: {doc_id}")
+                        print(f"[Firebase] [BATCH] ✓ Successfully saved new job {idx} with ID: {doc_id}")
                 except Exception as job_error:
                     print(f"[Firebase] [BATCH] [ERROR] Failed to save job {idx}: {str(job_error)}")
                     import traceback

@@ -94,70 +94,104 @@ def summarize_scraped_data(
         print(f"Description preview (first 200 chars): {str(scraped_data.get('description', ''))[:200]}...")
         print("="*80 + "\n")
         
-        # Combine all relevant fields
+        # Combine all relevant fields - prioritize raw scraped data
         content_parts = []
         
+        # CRITICAL: Start with raw scraped text content (most reliable source)
         if scraped_data.get("text_content"):
-            content_parts.append(f"Full Page Text:\n{scraped_data['text_content']}")
+            content_parts.append(f"=== RAW SCRAPED PAGE TEXT (PRIMARY SOURCE) ===\n{scraped_data['text_content']}\n")
         
+        # Also include description if available (may be processed/cleaned version)
         if scraped_data.get("description"):
-            content_parts.append(f"Description:\n{scraped_data['description']}")
+            content_parts.append(f"=== DESCRIPTION FIELD ===\n{scraped_data['description']}\n")
         
+        # Include other structured fields
         if scraped_data.get("qualifications"):
-            content_parts.append(f"Qualifications:\n{scraped_data['qualifications']}")
+            content_parts.append(f"=== QUALIFICATIONS ===\n{scraped_data['qualifications']}\n")
         
         if scraped_data.get("suggested_skills"):
-            content_parts.append(f"Suggested Skills:\n{scraped_data['suggested_skills']}")
+            content_parts.append(f"=== SUGGESTED SKILLS ===\n{scraped_data['suggested_skills']}\n")
         
+        # WARNING: Pre-extracted fields may contain errors - use with caution
         if scraped_data.get("job_title"):
-            content_parts.append(f"Job Title: {scraped_data['job_title']}")
+            content_parts.append(f"=== PRE-EXTRACTED JOB TITLE (MAY CONTAIN ERRORS - VERIFY FROM RAW TEXT) ===\n{scraped_data['job_title']}\n")
         
         if scraped_data.get("company_name"):
-            content_parts.append(f"Company: {scraped_data['company_name']}")
+            content_parts.append(f"=== PRE-EXTRACTED COMPANY NAME (MAY CONTAIN ERRORS - VERIFY FROM RAW TEXT) ===\n{scraped_data['company_name']}\n")
         
         if scraped_data.get("location"):
-            content_parts.append(f"Location: {scraped_data['location']}")
+            content_parts.append(f"=== PRE-EXTRACTED LOCATION ===\n{scraped_data['location']}\n")
         
-        content_to_analyze = "\n\n".join(content_parts) if content_parts else str(scraped_data)
+        content_to_analyze = "\n".join(content_parts) if content_parts else str(scraped_data)
     else:
         content_to_analyze = str(scraped_data)
         print(f"[SUMMARIZER] Received non-dict data: {type(scraped_data)}")
     
-    # Create extraction prompt (same structure as app.py lines 1728-1742)
-    extraction_prompt = f"""Given the following scraped job posting data, extract ALL available information and return it in a structured format.
+    # Create extraction prompt with emphasis on using raw scraped data
+    extraction_prompt = f"""You are extracting structured information from RAW SCRAPED JOB POSTING DATA. 
+The raw data may contain extraction errors in job title and company name fields, so you must carefully analyze 
+the FULL TEXT CONTENT to find the correct information.
 
-CRITICAL: You MUST extract and return the following fields. These are REQUIRED:
+RAW SCRAPED DATA PROVIDED:
+{content_to_analyze}
 
-1. **Job title** (REQUIRED - exact title from posting):
-   - Look for the main job title/position name
-   - Extract from headings, titles, or prominent text
-   - Examples: "Full Stack Developer", "Software Engineer", "Data Scientist"
-   - If not found, return "Not specified"
+CRITICAL EXTRACTION RULES:
 
-2. **Company name** (REQUIRED - name of the hiring company):
-   - Look for company name in various formats: "by [Company]", "Company:", "at [Company]", "from [Company]"
-   - Check for company names near the job title or in headers
-   - Examples: "Michael Page Technology", "Google", "Microsoft Corporation"
-   - If a pre-extracted company name is provided in the data, use it if it seems valid
-   - If not found, return "Not specified"
+1. **Job Title** (REQUIRED - MUST be extracted accurately):
+   - IGNORE any pre-extracted job title if it seems incorrect or truncated
+   - Look in the FULL TEXT CONTENT for the actual job title
+   - Common locations: Page title, H1/H2 headings, first few lines of content, metadata
+   - Look for patterns like: "Job Title:", "Position:", "Role:", or standalone prominent text
+   - Extract the COMPLETE job title (e.g., "Senior Software Engineer", not just "Engineer")
+   - Examples: "Full Stack Developer", "Software Engineer", "Data Scientist", "Product Manager"
+   - REJECT: Generic words like "Job", "Position", "Role", "Opportunity", "Career"
+   - REJECT: Truncated titles ending with "..." or incomplete words
+   - If truly not found after thorough analysis, return "Not specified"
 
-3. Complete job description
-4. Required skills (list each skill separately)
-5. Required experience (years and type)
-6. Qualifications and education requirements
-7. Responsibilities
-8. Salary/compensation (if mentioned)
-9. Location
-10. Job type (full-time, internship, etc.)
-11. Visa sponsorship or scholarship information (if mentioned - look for keywords like: visa sponsorship, visa support, H1B, work permit, scholarship, funding, financial support, tuition assistance, etc.)
+2. **Company Name** (REQUIRED - MUST be extracted accurately):
+   - IGNORE any pre-extracted company name if it seems incorrect (e.g., "hirer", "employer", generic words)
+   - Look in the FULL TEXT CONTENT for the actual company name
+   - Common locations: "by [Company]", "Company:", "at [Company]", "from [Company]", "Employer:", "Organization:"
+   - Check page headers, footers, and metadata sections
+   - Look for company names with legal suffixes: Ltd, Limited, Inc, LLC, Corp, Corporation, Group, Holdings
+   - Examples: "EPAM Systems", "Microsoft Corporation", "Google LLC", "Amazon Web Services"
+   - REJECT: Generic words like "hirer", "employer", "recruiter", "hiring", "company", "organization"
+   - REJECT: Sentence fragments like "transforming legacy data", "leveraging technology"
+   - REJECT: Truncated names ending with "..." or incomplete words
+   - REJECT: Names that are clearly part of a sentence (e.g., "by leveraging", "at transforming")
+   - If truly not found after thorough analysis, return "Not specified"
 
-Return structured data with all fields clearly labeled.
-IMPORTANT: Job title and Company name are CRITICAL fields - make every effort to extract them accurately from the content.
-If a field is not found, mark it as 'Not specified'.
-For visa/scholarship information: If mentioned, extract the exact details. If not mentioned, set to 'Not specified'.
+3. **Complete Job Description**: Extract the full job description from the content
+4. **Required Skills**: List each skill separately (e.g., Python, JavaScript, React)
+5. **Required Experience**: Extract years and type (e.g., "3-5 years", "Senior level")
+6. **Qualifications and Education**: Extract education requirements
+7. **Responsibilities**: Extract key responsibilities and duties
+8. **Salary/Compensation**: Extract if mentioned (e.g., "$100k-$150k", "£50,000-£70,000")
+9. **Location**: Extract job location (city, state, country, or remote)
+10. **Job Type**: Extract employment type (full-time, part-time, contract, internship, etc.)
+11. **Visa Sponsorship/Scholarship**: Look for keywords like: visa sponsorship, visa support, H1B, work permit, 
+    scholarship, funding, financial support, tuition assistance. Extract exact details if mentioned.
 
-Content:
-{content_to_analyze}"""
+EXTRACTION METHODOLOGY:
+- Read the ENTIRE raw scraped content carefully
+- Cross-reference multiple sections to find the correct job title and company name
+- Prioritize information from structured sections (headings, metadata) over free text
+- Validate extracted company names: they should be proper nouns, not generic words or sentence fragments
+- Validate extracted job titles: they should be specific positions, not generic terms
+
+OUTPUT FORMAT:
+Return structured data with all fields clearly labeled. Use clear field names like:
+- Job Title: [extracted title]
+- Company Name: [extracted company name]
+- Description: [full description]
+- Required Skills: [list of skills]
+- etc.
+
+IMPORTANT: 
+- Job title and Company name are CRITICAL - spend extra time verifying these from the raw content
+- If a pre-extracted value seems wrong, IGNORE it and extract from the raw content instead
+- If a field is not found, mark it as 'Not specified'
+- For visa/scholarship: If mentioned, extract exact details. If not mentioned, set to 'Not specified'"""
     
     try:
         # Run agent
