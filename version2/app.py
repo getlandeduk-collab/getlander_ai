@@ -3902,377 +3902,377 @@ Be honest about the fit level based on the score.
         print("="*80)
         
         sponsorship_info = None
-        if matched_jobs:
-            # Check sponsorship for all matched jobs in parallel
-            sponsorship_semaphore = asyncio.Semaphore(3)  # Allow up to 3 concurrent sponsorship checks
-            
-            async def check_sponsorship_async(job: MatchedJob) -> Optional[Dict[str, Any]]:
-                """Check sponsorship for a single job asynchronously."""
-                async with sponsorship_semaphore:
-                    try:
-                        from sponsorship_checker import check_sponsorship, get_company_info_from_web
-                        
-                        # Get company name from the job
-                        company_name = job.company
-                        
-                        # Clean company name using our cleaning function
-                        company_name = clean_company_name(company_name)
-                        
-                        # Get job content for extraction if needed
-                        # Try from scraped_summary first, then from summary, then from cache
-                        job_content = job.scraped_summary or job.summary or ""
-                        
-                        # If company name is a fallback message or invalid, try to extract from job content
-                        if not company_name or company_name == "Company name not available in posting" or not is_valid_company_name(company_name):
-                            if job_content:
-                                company_name = extract_company_name_from_content(job_content, company_name)
-                        if not job_content and job.job_url:
-                            cached_data = SCRAPE_CACHE.get(str(job.job_url), {})
-                            job_content = cached_data.get('description') or cached_data.get('scraped_summary') or cached_data.get('text_content') or ""
-                        
-                        # Validate company name before checking
-                        if not company_name or not is_valid_company_name(company_name):
-                            print(f"[Sponsorship] Invalid company name '{company_name}', skipping check")
-                            return None
-                        
-                        # Get OpenAI API key for agent-based company matching
-                        openai_key = settings.openai_api_key or os.getenv("OPENAI_API_KEY")
-                        
-                        print(f"[Sponsorship] Checking company: {company_name}")
-                        # Run in thread pool since check_sponsorship is synchronous
-                        sponsorship_result = await asyncio.to_thread(check_sponsorship, company_name, job_content, openai_key)
-                        
-                        # Get company info from web using Phi agent (optional, can be slow)
-                        company_info_summary = None
-                        matched_company_name = sponsorship_result.get('company_name') or company_name
-                        if matched_company_name and matched_company_name.lower() not in ["unknown", "not specified", "none", ""]:
-                            try:
-                                if openai_key:
-                                    print(f"[Sponsorship] Fetching additional company information from web for {matched_company_name}...")
-                                    # Run in thread pool since get_company_info_from_web is synchronous
-                                    company_info_summary = await asyncio.to_thread(get_company_info_from_web, matched_company_name, openai_key)
-                                else:
-                                    print(f"[Sponsorship] OpenAI API key not available, skipping web search")
-                            except Exception as e:
-                                print(f"[Sponsorship] Error fetching company info from web: {e}")
-                                # Continue without web info - not critical
-                        
-                        # Build enhanced summary
-                        base_summary = sponsorship_result.get('summary', 'No sponsorship information available')
-                        base_summary = clean_summary_text(base_summary)
-                        enhanced_summary = base_summary
-                        
-                        if company_info_summary:
-                            # Clean company info
-                            company_info_cleaned = clean_summary_text(company_info_summary)
+        try:
+            if matched_jobs:
+                # Check sponsorship for all matched jobs in parallel
+                sponsorship_semaphore = asyncio.Semaphore(3)  # Allow up to 3 concurrent sponsorship checks
+                
+                async def check_sponsorship_async(job: MatchedJob) -> Optional[Dict[str, Any]]:
+                    """Check sponsorship for a single job asynchronously."""
+                    async with sponsorship_semaphore:
+                        try:
+                            from sponsorship_checker import check_sponsorship, get_company_info_from_web
                             
-                            # Remove redundant visa sponsorship information from company info
-                            sponsors_workers = sponsorship_result.get('sponsors_workers', False)
-                            if sponsors_workers:
-                                # Split into sentences and filter out redundant ones
-                                sentences = re.split(r'[.!?]+', company_info_cleaned)
-                                filtered_sentences = []
-                                
-                                for sentence in sentences:
-                                    sentence = sentence.strip()
-                                    if not sentence or len(sentence) < 10:
-                                        continue
-                                    
-                                    sentence_lower = sentence.lower()
-                                    
-                                    # Skip sentences about visa sponsorship that are uncertain/redundant
-                                    if any(phrase in sentence_lower for phrase in ['visa sponsorship', 'visa sponsor', 'visa not', 'visa information']):
-                                        if any(uncertain_phrase in sentence_lower for uncertain_phrase in [
-                                            'not found', 'was not found', 'not available', 'uncertain',
-                                            'potentially', 'generally', 'might', 'may', 'could', 'contact',
-                                            'check', 'definitive information', 'advisable', 'check their',
-                                            'hr department', 'official careers', 'cannot be filled'
-                                        ]):
-                                            continue
-                                    
-                                    filtered_sentences.append(sentence)
-                                
-                                # Rejoin sentences
-                                company_info_cleaned = '. '.join(filtered_sentences)
-                                if company_info_cleaned and not company_info_cleaned.endswith(('.', '!', '?')):
-                                    company_info_cleaned += '.'
-                                company_info_cleaned = re.sub(r'\s+', ' ', company_info_cleaned).strip()
+                            # Get company name from the job
+                            company_name = job.company
                             
-                            # Only append company info if there's substantial unique content
-                            if company_info_cleaned and len(company_info_cleaned.strip()) > 30:
-                                if base_summary:
-                                    base_lower = base_summary.lower()
-                                    company_lower = company_info_cleaned.lower()
-                                    
-                                    # Simple overlap check
-                                    base_words = {w for w in base_lower.split() if len(w) > 4}
-                                    company_words = {w for w in company_lower.split() if len(w) > 4}
-                                    common_words = base_words & company_words
-                                    
-                                    if len(common_words) > 0 and len(common_words) / max(len(company_words), 1) > 0.4:
-                                        enhanced_summary = base_summary
+                            # Clean company name using our cleaning function
+                            company_name = clean_company_name(company_name)
+                            
+                            # Get job content for extraction if needed
+                            # Try from scraped_summary first, then from summary, then from cache
+                            job_content = job.scraped_summary or job.summary or ""
+                            
+                            # If company name is a fallback message or invalid, try to extract from job content
+                            if not company_name or company_name == "Company name not available in posting" or not is_valid_company_name(company_name):
+                                if job_content:
+                                    company_name = extract_company_name_from_content(job_content, company_name)
+                            if not job_content and job.job_url:
+                                cached_data = SCRAPE_CACHE.get(str(job.job_url), {})
+                                job_content = cached_data.get('description') or cached_data.get('scraped_summary') or cached_data.get('text_content') or ""
+                            
+                            # Validate company name before checking
+                            if not company_name or not is_valid_company_name(company_name):
+                                print(f"[Sponsorship] Invalid company name '{company_name}', skipping check")
+                                return None
+                            
+                            # Get OpenAI API key for agent-based company matching
+                            openai_key = settings.openai_api_key or os.getenv("OPENAI_API_KEY")
+                            
+                            print(f"[Sponsorship] Checking company: {company_name}")
+                            # Run in thread pool since check_sponsorship is synchronous
+                            sponsorship_result = await asyncio.to_thread(check_sponsorship, company_name, job_content, openai_key)
+                            
+                            # Get company info from web using Phi agent (optional, can be slow)
+                            company_info_summary = None
+                            matched_company_name = sponsorship_result.get('company_name') or company_name
+                            if matched_company_name and matched_company_name.lower() not in ["unknown", "not specified", "none", ""]:
+                                try:
+                                    if openai_key:
+                                        print(f"[Sponsorship] Fetching additional company information from web for {matched_company_name}...")
+                                        # Run in thread pool since get_company_info_from_web is synchronous
+                                        company_info_summary = await asyncio.to_thread(get_company_info_from_web, matched_company_name, openai_key)
                                     else:
-                                        enhanced_summary = f"{base_summary}. {company_info_cleaned}"
-                                else:
-                                    enhanced_summary = company_info_cleaned
-                            else:
-                                enhanced_summary = base_summary
+                                        print(f"[Sponsorship] OpenAI API key not available, skipping web search")
+                                except Exception as e:
+                                    print(f"[Sponsorship] Error fetching company info from web: {e}")
+                                    # Continue without web info - not critical
                             
-                            # Normalize whitespace
-                            enhanced_summary = re.sub(r'\s+', ' ', enhanced_summary)
-                            enhanced_summary = re.sub(r'\.\s*\.', '.', enhanced_summary)
-                            enhanced_summary = enhanced_summary.strip()
-                            print(f"[Sponsorship] Enhanced summary with company information from web")
+                            # Build enhanced summary
+                            base_summary = sponsorship_result.get('summary', 'No sponsorship information available')
+                            base_summary = clean_summary_text(base_summary)
+                            enhanced_summary = base_summary
+                            
+                            if company_info_summary:
+                                # Clean company info
+                                company_info_cleaned = clean_summary_text(company_info_summary)
+                                
+                                # Remove redundant visa sponsorship information from company info
+                                sponsors_workers = sponsorship_result.get('sponsors_workers', False)
+                                if sponsors_workers:
+                                    # Split into sentences and filter out redundant ones
+                                    sentences = re.split(r'[.!?]+', company_info_cleaned)
+                                    filtered_sentences = []
+                                    
+                                    for sentence in sentences:
+                                        sentence = sentence.strip()
+                                        if not sentence or len(sentence) < 10:
+                                            continue
+                                        
+                                        sentence_lower = sentence.lower()
+                                        
+                                        # Skip sentences about visa sponsorship that are uncertain/redundant
+                                        if any(phrase in sentence_lower for phrase in ['visa sponsorship', 'visa sponsor', 'visa not', 'visa information']):
+                                            if any(uncertain_phrase in sentence_lower for uncertain_phrase in [
+                                                'not found', 'was not found', 'not available', 'uncertain',
+                                                'potentially', 'generally', 'might', 'may', 'could', 'contact',
+                                                'check', 'definitive information', 'advisable', 'check their',
+                                                'hr department', 'official careers', 'cannot be filled'
+                                            ]):
+                                                continue
+                                        
+                                        filtered_sentences.append(sentence)
+                                    
+                                    # Rejoin sentences
+                                    company_info_cleaned = '. '.join(filtered_sentences)
+                                    if company_info_cleaned and not company_info_cleaned.endswith(('.', '!', '?')):
+                                        company_info_cleaned += '.'
+                                    company_info_cleaned = re.sub(r'\s+', ' ', company_info_cleaned).strip()
+                                
+                                # Only append company info if there's substantial unique content
+                                if company_info_cleaned and len(company_info_cleaned.strip()) > 30:
+                                    if base_summary:
+                                        base_lower = base_summary.lower()
+                                        company_lower = company_info_cleaned.lower()
+                                        
+                                        # Simple overlap check
+                                        base_words = {w for w in base_lower.split() if len(w) > 4}
+                                        company_words = {w for w in company_lower.split() if len(w) > 4}
+                                        common_words = base_words & company_words
+                                        
+                                        if len(common_words) > 0 and len(common_words) / max(len(company_words), 1) > 0.4:
+                                            enhanced_summary = base_summary
+                                        else:
+                                            enhanced_summary = f"{base_summary}. {company_info_cleaned}"
+                                    else:
+                                        enhanced_summary = company_info_cleaned
+                                else:
+                                    enhanced_summary = base_summary
+                                
+                                # Normalize whitespace
+                                enhanced_summary = re.sub(r'\s+', ' ', enhanced_summary)
+                                enhanced_summary = re.sub(r'\.\s*\.', '.', enhanced_summary)
+                                enhanced_summary = enhanced_summary.strip()
+                                print(f"[Sponsorship] Enhanced summary with company information from web")
+                            
+                            return {
+                                'company_name': sponsorship_result.get('company_name'),
+                                'sponsors_workers': sponsorship_result.get('sponsors_workers', False),
+                                'visa_types': sponsorship_result.get('visa_types'),
+                                'summary': enhanced_summary,
+                                'job': job
+                            }
+                        except Exception as e:
+                            print(f"[Sponsorship] Error checking sponsorship for {job.company}: {e}")
+                            import traceback
+                            print(traceback.format_exc())
+                            return None
+                
+                # Check sponsorship for all matched jobs in parallel
+                print(f"[Sponsorship] Checking sponsorship for {len(matched_jobs)} jobs in parallel...")
+                sponsorship_tasks = [check_sponsorship_async(job) for job in matched_jobs]
+                sponsorship_results = await asyncio.gather(*sponsorship_tasks, return_exceptions=True)
+                
+                # Filter out exceptions and None results
+                valid_sponsorship_results = [r for r in sponsorship_results if r and not isinstance(r, Exception)]
+                
+                if valid_sponsorship_results:
+                    # Match results to jobs and prioritize the top job's result
+                    # Create a mapping of job URL to sponsorship result
+                    sponsorship_by_job = {}
+                    for result in valid_sponsorship_results:
+                        job = result.get('job')
+                        if job and job.job_url:
+                            sponsorship_by_job[str(job.job_url)] = result
+                    
+                    # Try to get the top job's sponsorship result
+                    sponsorship_result = None
+                    if matched_jobs and len(matched_jobs) > 0:
+                        top_job_url = str(matched_jobs[0].job_url)
+                        if top_job_url in sponsorship_by_job:
+                            sponsorship_result = sponsorship_by_job[top_job_url]
+                            print(f"[Sponsorship] Using sponsorship result from top job: {matched_jobs[0].company}")
+                    
+                    # Fallback to first valid result if top job's result not found
+                    if not sponsorship_result:
+                        sponsorship_result = valid_sponsorship_results[0]
+                        print(f"[Sponsorship] Using first available sponsorship result")
+                    
+                    try:
+                        from models import SponsorshipInfo
                         
-                        return {
-                            'company_name': sponsorship_result.get('company_name'),
-                            'sponsors_workers': sponsorship_result.get('sponsors_workers', False),
-                            'visa_types': sponsorship_result.get('visa_types'),
-                            'summary': enhanced_summary,
-                            'job': job
-                        }
+                        sponsorship_info = SponsorshipInfo(
+                            company_name=sponsorship_result.get('company_name'),
+                            sponsors_workers=sponsorship_result.get('sponsors_workers', False),
+                            visa_types=sponsorship_result.get('visa_types'),
+                            summary=sponsorship_result.get('summary')
+                        )
+                        
+                        print(f"[Sponsorship] Result: {'✓ Sponsors workers' if sponsorship_info.sponsors_workers else '✗ Does not sponsor workers'}")
+                        if sponsorship_info.visa_types:
+                            print(f"[Sponsorship] Visa types: {sponsorship_info.visa_types}")
                     except Exception as e:
-                        print(f"[Sponsorship] Error checking sponsorship for {job.company}: {e}")
+                        print(f"[Sponsorship] Error creating SponsorshipInfo: {e}")
+                        sponsorship_info = None
+                    
+                    # Update matched job summary to reflect actual sponsorship info (remove "No mention..." text)
+                    if matched_jobs and len(matched_jobs) > 0:
+                        top_job = matched_jobs[0]
+                        if top_job.summary:
+                            summary_text = top_job.summary
+                            
+                            # Remove "No mention..." or similar text about sponsorship (comprehensive patterns)
+                            patterns_to_remove = [
+                                r'No\s+specific\s+information\s+about\s+visa\s+sponsorship[^.]*\.',
+                                r'No\s+mention\s+was\s+made\s+of\s+any\s+visa\s+sponsorship[^.]*\.',
+                                r'No\s+(?:mention\s+was\s+made\s+of\s+any\s+)?visa\s+sponsorship[^.]*\.',
+                                r'No\s+visa\s+sponsorship[^.]*\.',
+                                r'visa\s+sponsorship[^.]*not\s+mentioned[^.]*\.',
+                                r'visa\s+sponsorship[^.]*is\s+not\s+mentioned[^.]*\.',
+                                r'no\s+information\s+about\s+visa\s+sponsorship[^.]*\.',
+                                r'scholarship[^.]*not\s+mentioned[^.]*\.',
+                            ]
+                            
+                            for pattern in patterns_to_remove:
+                                summary_text = re.sub(pattern, '', summary_text, flags=re.IGNORECASE)
+                            
+                            # Remove sentences about location and visa sponsorship that are now redundant
+                            summary_text = re.sub(
+                                r'(?:The\s+role\s+)?does\s+not\s+specify\s+a\s+location[^.]*\.',
+                                '',
+                                summary_text,
+                                flags=re.IGNORECASE
+                            )
+                            
+                            # Normalize whitespace after removal
+                            summary_text = re.sub(r'\s+', ' ', summary_text)
+                            summary_text = summary_text.strip()
+                            
+                            # Remove trailing/leading punctuation issues from removals
+                            summary_text = re.sub(r'\s+([,.;])\s+', r'\1 ', summary_text)
+                            summary_text = re.sub(r'\s+([,.;])\s*$', '', summary_text)
+                            
+                            # Add actual sponsorship information if found
+                            if sponsorship_info.sponsors_workers:
+                                sponsorship_text = f"Visa Sponsorship: {sponsorship_info.company_name} is a registered UK visa sponsor"
+                                if sponsorship_info.visa_types:
+                                    sponsorship_text += f" (Visa Routes: {sponsorship_info.visa_types})"
+                                sponsorship_text += "."
+                                
+                                # Append sponsorship info to summary (ensure it doesn't duplicate)
+                                if "visa sponsor" not in summary_text.lower() and "visa sponsorship" not in summary_text.lower():
+                                    summary_text = f"{summary_text} {sponsorship_text}" if summary_text else sponsorship_text
+                            
+                            # Clean and normalize the updated summary
+                            summary_text = clean_summary_text(summary_text)
+                            
+                            # Update the matched job summary
+                            top_job.summary = summary_text
+                            print(f"[Sponsorship] Updated matched job summary with actual sponsorship information")
+                    
+                    # Save sponsorship info to Firestore as a separate document
+                    try:
+                        # Get user_id (same logic as used for saving job applications at line 1554-1559)
+                        # user_id is already extracted earlier in the function
+                        sponsorship_user_id = user_id if 'user_id' in locals() and user_id else None
+                        if not sponsorship_user_id:
+                            if 'data' in locals() and data:
+                                sponsorship_user_id = getattr(data, 'user_id', None)
+                            if not sponsorship_user_id and 'legacy_data' in locals() and legacy_data:
+                                sponsorship_user_id = getattr(legacy_data, 'user_id', None)
+                        
+                        if sponsorship_user_id:
+                            # Reuse the same firebase_service instance that was used for job_applications
+                            # This ensures we're using the same authenticated client
+                            if 'firebase_service' not in locals():
+                                from firebase_service import get_firebase_service
+                                firebase_service = get_firebase_service()
+                                print(f"[Sponsorship] [DEBUG] Created new Firebase service instance")
+                            else:
+                                print(f"[Sponsorship] [DEBUG] Reusing existing Firebase service instance")
+                            
+                            # Prepare sponsorship data dictionary (use enhanced summary)
+                            sponsorship_dict = {
+                                "company_name": sponsorship_result.get('company_name'),
+                                "sponsors_workers": sponsorship_result.get('sponsors_workers', False),
+                                "visa_types": sponsorship_result.get('visa_types'),
+                                "summary": enhanced_summary  # Use enhanced summary with company info
+                            }
+                            
+                            # Prepare job info (same structure as used for job_applications)
+                            job_info = None
+                            if matched_jobs and len(matched_jobs) > 0:
+                                top_job = matched_jobs[0]
+                                # Extract portal from job_url if available
+                                portal = "Unknown"
+                                job_url_str = str(top_job.job_url) if top_job.job_url else ""
+                                if "linkedin.com" in job_url_str.lower():
+                                    portal = "LinkedIn"
+                                elif "indeed.com" in job_url_str.lower():
+                                    portal = "Indeed"
+                                elif "glassdoor.com" in job_url_str.lower():
+                                    portal = "Glassdoor"
+                                
+                                job_info = {
+                                    "job_title": top_job.job_title,
+                                    "job_url": job_url_str,
+                                    "company": top_job.company,
+                                    "portal": portal
+                                }
+                            
+                            # Save to Firestore - this will raise an exception if it fails
+                            print(f"\n{'='*80}")
+                            print(f"[Sponsorship] [SAVE] Attempting to save sponsorship info to Firestore...")
+                            print(f"[Sponsorship] [SAVE] User ID: {sponsorship_user_id}")
+                            print(f"[Sponsorship] [SAVE] Request ID: {request_id}")
+                            print(f"[Sponsorship] [SAVE] Company: {sponsorship_dict.get('company_name')}")
+                            print(f"{'='*80}\n")
+                            
+                            doc_id = firebase_service.save_sponsorship_info(
+                                user_id=sponsorship_user_id,
+                                request_id=request_id,
+                                sponsorship_data=sponsorship_dict,
+                                job_info=job_info
+                            )
+                            
+                            # Fetch the saved document to include in response
+                            document_data = None
+                            try:
+                                from firebase_admin import firestore
+                                db = firestore.client()
+                                doc_ref = db.collection("sponsorship_checks").document(sponsorship_user_id).collection("checks").document(doc_id)
+                                doc = doc_ref.get()
+                                if doc.exists:
+                                    document_data = doc.to_dict()
+                                    # Convert datetime objects to ISO format strings for JSON serialization
+                                    if document_data:
+                                        for key, value in document_data.items():
+                                            if isinstance(value, datetime):
+                                                document_data[key] = value.isoformat()
+                                    print(f"[Sponsorship] [FETCH] Successfully fetched document data from Firestore")
+                                else:
+                                    print(f"[Sponsorship] [FETCH] Warning: Document not found after save")
+                            except Exception as fetch_error:
+                                print(f"[Sponsorship] [FETCH] Error fetching document: {fetch_error}")
+                                # Don't fail the request if fetch fails, just log it
+                            
+                            # Update sponsorship_info with document data
+                            if sponsorship_info and document_data:
+                                sponsorship_info.document_id = doc_id
+                                sponsorship_info.document_data = document_data
+                                print(f"[Sponsorship] [RESPONSE] Added document data to sponsorship_info")
+                            
+                            print(f"\n{'='*80}")
+                            print(f"[Sponsorship] ✓ SUCCESS - Saved sponsorship info to Firestore")
+                            print(f"[Sponsorship] [DOC_ID] {doc_id}")
+                            print(f"[Sponsorship] [PATH] sponsorship_checks/{sponsorship_user_id}/checks/{doc_id}")
+                            print(f"[Sponsorship] [NOTE] In Firebase Console: sponsorship_checks > {sponsorship_user_id} > checks > {doc_id}")
+                            print(f"{'='*80}\n")
+                        else:
+                            print("[Sponsorship] ⚠️  User ID not found, skipping Firestore save")
+                            
+                    except ImportError as e:
+                        print(f"[Sponsorship] [ERROR] Firebase service not available: {e}")
+                        print(f"[Sponsorship] [ERROR] Install firebase-admin: pip install firebase-admin")
                         import traceback
                         print(traceback.format_exc())
-                        return None
-            
-            # Check sponsorship for all matched jobs in parallel
-            print(f"[Sponsorship] Checking sponsorship for {len(matched_jobs)} jobs in parallel...")
-            sponsorship_tasks = [check_sponsorship_async(job) for job in matched_jobs]
-            sponsorship_results = await asyncio.gather(*sponsorship_tasks, return_exceptions=True)
-            
-            # Filter out exceptions and None results
-            valid_sponsorship_results = [r for r in sponsorship_results if r and not isinstance(r, Exception)]
-            
-            if valid_sponsorship_results:
-                # Match results to jobs and prioritize the top job's result
-                # Create a mapping of job URL to sponsorship result
-                sponsorship_by_job = {}
-                for result in valid_sponsorship_results:
-                    job = result.get('job')
-                    if job and job.job_url:
-                        sponsorship_by_job[str(job.job_url)] = result
-                
-                # Try to get the top job's sponsorship result
-                sponsorship_result = None
-                if matched_jobs and len(matched_jobs) > 0:
-                    top_job_url = str(matched_jobs[0].job_url)
-                    if top_job_url in sponsorship_by_job:
-                        sponsorship_result = sponsorship_by_job[top_job_url]
-                        print(f"[Sponsorship] Using sponsorship result from top job: {matched_jobs[0].company}")
-                
-                # Fallback to first valid result if top job's result not found
-                if not sponsorship_result:
-                    sponsorship_result = valid_sponsorship_results[0]
-                    print(f"[Sponsorship] Using first available sponsorship result")
-                
-                try:
-                    from models import SponsorshipInfo
-                    
-                    sponsorship_info = SponsorshipInfo(
-                        company_name=sponsorship_result.get('company_name'),
-                        sponsors_workers=sponsorship_result.get('sponsors_workers', False),
-                        visa_types=sponsorship_result.get('visa_types'),
-                        summary=sponsorship_result.get('summary')
-                    )
-                    
-                    print(f"[Sponsorship] Result: {'✓ Sponsors workers' if sponsorship_info.sponsors_workers else '✗ Does not sponsor workers'}")
-                    if sponsorship_info.visa_types:
-                        print(f"[Sponsorship] Visa types: {sponsorship_info.visa_types}")
-                except Exception as e:
-                    print(f"[Sponsorship] Error creating SponsorshipInfo: {e}")
-                    sponsorship_info = None
-                
-                # Update matched job summary to reflect actual sponsorship info (remove "No mention..." text)
-                if matched_jobs and len(matched_jobs) > 0:
-                    top_job = matched_jobs[0]
-                    if top_job.summary:
-                        summary_text = top_job.summary
-                        
-                        # Remove "No mention..." or similar text about sponsorship (comprehensive patterns)
-                        patterns_to_remove = [
-                            r'No\s+specific\s+information\s+about\s+visa\s+sponsorship[^.]*\.',
-                            r'No\s+mention\s+was\s+made\s+of\s+any\s+visa\s+sponsorship[^.]*\.',
-                            r'No\s+(?:mention\s+was\s+made\s+of\s+any\s+)?visa\s+sponsorship[^.]*\.',
-                            r'No\s+visa\s+sponsorship[^.]*\.',
-                            r'visa\s+sponsorship[^.]*not\s+mentioned[^.]*\.',
-                            r'visa\s+sponsorship[^.]*is\s+not\s+mentioned[^.]*\.',
-                            r'no\s+information\s+about\s+visa\s+sponsorship[^.]*\.',
-                            r'scholarship[^.]*not\s+mentioned[^.]*\.',
-                        ]
-                        
-                        for pattern in patterns_to_remove:
-                            summary_text = re.sub(pattern, '', summary_text, flags=re.IGNORECASE)
-                        
-                        # Remove sentences about location and visa sponsorship that are now redundant
-                        summary_text = re.sub(
-                            r'(?:The\s+role\s+)?does\s+not\s+specify\s+a\s+location[^.]*\.',
-                            '',
-                            summary_text,
-                            flags=re.IGNORECASE
-                        )
-                        
-                        # Normalize whitespace after removal
-                        summary_text = re.sub(r'\s+', ' ', summary_text)
-                        summary_text = summary_text.strip()
-                        
-                        # Remove trailing/leading punctuation issues from removals
-                        summary_text = re.sub(r'\s+([,.;])\s+', r'\1 ', summary_text)
-                        summary_text = re.sub(r'\s+([,.;])\s*$', '', summary_text)
-                        
-                        # Add actual sponsorship information if found
-                        if sponsorship_info.sponsors_workers:
-                            sponsorship_text = f"Visa Sponsorship: {sponsorship_info.company_name} is a registered UK visa sponsor"
-                            if sponsorship_info.visa_types:
-                                sponsorship_text += f" (Visa Routes: {sponsorship_info.visa_types})"
-                            sponsorship_text += "."
-                            
-                            # Append sponsorship info to summary (ensure it doesn't duplicate)
-                            if "visa sponsor" not in summary_text.lower() and "visa sponsorship" not in summary_text.lower():
-                                summary_text = f"{summary_text} {sponsorship_text}" if summary_text else sponsorship_text
-                        
-                        # Clean and normalize the updated summary
-                        summary_text = clean_summary_text(summary_text)
-                        
-                        # Update the matched job summary
-                        top_job.summary = summary_text
-                        print(f"[Sponsorship] Updated matched job summary with actual sponsorship information")
-                
-                # Save sponsorship info to Firestore as a separate document
-                try:
-                    # Get user_id (same logic as used for saving job applications at line 1554-1559)
-                    # user_id is already extracted earlier in the function
-                    sponsorship_user_id = user_id if 'user_id' in locals() and user_id else None
-                    if not sponsorship_user_id:
-                        if 'data' in locals() and data:
-                            sponsorship_user_id = getattr(data, 'user_id', None)
-                        if not sponsorship_user_id and 'legacy_data' in locals() and legacy_data:
-                            sponsorship_user_id = getattr(legacy_data, 'user_id', None)
-                    
-                    if sponsorship_user_id:
-                        # Reuse the same firebase_service instance that was used for job_applications
-                        # This ensures we're using the same authenticated client
-                        if 'firebase_service' not in locals():
-                            from firebase_service import get_firebase_service
-                            firebase_service = get_firebase_service()
-                            print(f"[Sponsorship] [DEBUG] Created new Firebase service instance")
-                        else:
-                            print(f"[Sponsorship] [DEBUG] Reusing existing Firebase service instance")
-                        
-                        # Prepare sponsorship data dictionary (use enhanced summary)
-                        sponsorship_dict = {
-                            "company_name": sponsorship_result.get('company_name'),
-                            "sponsors_workers": sponsorship_result.get('sponsors_workers', False),
-                            "visa_types": sponsorship_result.get('visa_types'),
-                            "summary": enhanced_summary  # Use enhanced summary with company info
-                        }
-                        
-                        # Prepare job info (same structure as used for job_applications)
-                        job_info = None
-                        if matched_jobs and len(matched_jobs) > 0:
-                            top_job = matched_jobs[0]
-                            # Extract portal from job_url if available
-                            portal = "Unknown"
-                            job_url_str = str(top_job.job_url) if top_job.job_url else ""
-                            if "linkedin.com" in job_url_str.lower():
-                                portal = "LinkedIn"
-                            elif "indeed.com" in job_url_str.lower():
-                                portal = "Indeed"
-                            elif "glassdoor.com" in job_url_str.lower():
-                                portal = "Glassdoor"
-                            
-                            job_info = {
-                                "job_title": top_job.job_title,
-                                "job_url": job_url_str,
-                                "company": top_job.company,
-                                "portal": portal
-                            }
-                        
-                        # Save to Firestore - this will raise an exception if it fails
+                    except RuntimeError as e:
+                        # RuntimeError is raised by save_sponsorship_info on failure
                         print(f"\n{'='*80}")
-                        print(f"[Sponsorship] [SAVE] Attempting to save sponsorship info to Firestore...")
-                        print(f"[Sponsorship] [SAVE] User ID: {sponsorship_user_id}")
-                        print(f"[Sponsorship] [SAVE] Request ID: {request_id}")
-                        print(f"[Sponsorship] [SAVE] Company: {sponsorship_dict.get('company_name')}")
+                        print(f"[Sponsorship] [CRITICAL ERROR] Failed to save sponsorship info to Firestore!")
+                        print(f"[Sponsorship] [ERROR] {e}")
+                        print(f"{'='*80}")
+                        import traceback
+                        print(traceback.format_exc())
                         print(f"{'='*80}\n")
-                        
-                        doc_id = firebase_service.save_sponsorship_info(
-                            user_id=sponsorship_user_id,
-                            request_id=request_id,
-                            sponsorship_data=sponsorship_dict,
-                            job_info=job_info
-                        )
-                        
-                        # Fetch the saved document to include in response
-                        document_data = None
-                        try:
-                            from firebase_admin import firestore
-                            db = firestore.client()
-                            doc_ref = db.collection("sponsorship_checks").document(sponsorship_user_id).collection("checks").document(doc_id)
-                            doc = doc_ref.get()
-                            if doc.exists:
-                                document_data = doc.to_dict()
-                                # Convert datetime objects to ISO format strings for JSON serialization
-                                if document_data:
-                                    for key, value in document_data.items():
-                                        if isinstance(value, datetime):
-                                            document_data[key] = value.isoformat()
-                                print(f"[Sponsorship] [FETCH] Successfully fetched document data from Firestore")
-                            else:
-                                print(f"[Sponsorship] [FETCH] Warning: Document not found after save")
-                        except Exception as fetch_error:
-                            print(f"[Sponsorship] [FETCH] Error fetching document: {fetch_error}")
-                            # Don't fail the request if fetch fails, just log it
-                        
-                        # Update sponsorship_info with document data
-                        if sponsorship_info and document_data:
-                            sponsorship_info.document_id = doc_id
-                            sponsorship_info.document_data = document_data
-                            print(f"[Sponsorship] [RESPONSE] Added document data to sponsorship_info")
-                        
+                        # Re-raise to ensure we know about it, but don't fail the entire request
+                        # The API response will still be returned
+                    except Exception as e:
                         print(f"\n{'='*80}")
-                        print(f"[Sponsorship] ✓ SUCCESS - Saved sponsorship info to Firestore")
-                        print(f"[Sponsorship] [DOC_ID] {doc_id}")
-                        print(f"[Sponsorship] [PATH] sponsorship_checks/{sponsorship_user_id}/checks/{doc_id}")
-                        print(f"[Sponsorship] [NOTE] In Firebase Console: sponsorship_checks > {sponsorship_user_id} > checks > {doc_id}")
+                        print(f"[Sponsorship] [CRITICAL ERROR] Unexpected error saving sponsorship info!")
+                        print(f"[Sponsorship] [ERROR] {e}")
+                        print(f"{'='*80}")
+                        import traceback
+                        print(traceback.format_exc())
                         print(f"{'='*80}\n")
-                    else:
-                        print("[Sponsorship] ⚠️  User ID not found, skipping Firestore save")
-                        
-                except ImportError as e:
-                    print(f"[Sponsorship] [ERROR] Firebase service not available: {e}")
-                    print(f"[Sponsorship] [ERROR] Install firebase-admin: pip install firebase-admin")
-                    import traceback
-                    print(traceback.format_exc())
-                except RuntimeError as e:
-                    # RuntimeError is raised by save_sponsorship_info on failure
-                    print(f"\n{'='*80}")
-                    print(f"[Sponsorship] [CRITICAL ERROR] Failed to save sponsorship info to Firestore!")
-                    print(f"[Sponsorship] [ERROR] {e}")
-                    print(f"{'='*80}")
-                    import traceback
-                    print(traceback.format_exc())
-                    print(f"{'='*80}\n")
-                    # Re-raise to ensure we know about it, but don't fail the entire request
-                    # The API response will still be returned
-                except Exception as e:
-                    print(f"\n{'='*80}")
-                    print(f"[Sponsorship] [CRITICAL ERROR] Unexpected error saving sponsorship info!")
-                    print(f"[Sponsorship] [ERROR] {e}")
-                    print(f"{'='*80}")
-                    import traceback
-                    print(traceback.format_exc())
-                    print(f"{'='*80}\n")
-                    # Re-raise to ensure we know about it, but don't fail the entire request
-                    
-            except ImportError as e:
-                print(f"[Sponsorship] Warning: Sponsorship checker not available: {e}")
-                print("[Sponsorship] Install pandas and fuzzywuzzy: pip install pandas fuzzywuzzy python-Levenshtein")
-            except Exception as e:
-                print(f"[Sponsorship] Error checking sponsorship: {e}")
-                import traceback
-                print(traceback.format_exc())
+                        # Re-raise to ensure we know about it, but don't fail the entire request
+        except ImportError as e:
+            print(f"[Sponsorship] Warning: Sponsorship checker not available: {e}")
+            print("[Sponsorship] Install pandas and fuzzywuzzy: pip install pandas fuzzywuzzy python-Levenshtein")
+        except Exception as e:
+            print(f"[Sponsorship] Error checking sponsorship: {e}")
+            import traceback
+            print(traceback.format_exc())
 
         response = MatchJobsResponse(
 
