@@ -358,17 +358,17 @@ class FirebaseService:
             company = job_data.get("company", "").strip()
             role = job_data.get("role", "").strip()
             
-            # Strategy 1: Check by job URL (most reliable) - using new filter() syntax
+            # Strategy 1: Check by job URL (most reliable)
             if job_link:
-                query = collection_ref.filter("link", "==", job_link).limit(1)
+                query = collection_ref.where("link", "==", job_link).limit(1)
                 docs = query.stream()
                 for doc in docs:
                     logger.debug(f"Duplicate found by URL: {doc.id}")
                     return doc.id
             
-            # Strategy 2: Check by company + role (fallback if no URL) - using new filter() syntax
+            # Strategy 2: Check by company + role (fallback if no URL)
             if company and role:
-                query = collection_ref.filter("company", "==", company).filter("role", "==", role).limit(1)
+                query = collection_ref.where("company", "==", company).where("role", "==", role).limit(1)
                 docs = query.stream()
                 for doc in docs:
                     logger.debug(f"Duplicate found by company+role: {doc.id}")
@@ -590,16 +590,16 @@ class FirebaseService:
             
             # Strategy 1: Check by request_id (most specific - same match-jobs request)
             if request_id:
-                query = collection_ref.filter("requestId", "==", request_id).limit(1)
+                query = collection_ref.where("requestId", "==", request_id).limit(1)
                 docs = query.stream()
                 for doc in docs:
                     logger.debug(f"Duplicate sponsorship found by request_id: {doc.id}")
                     return doc.id
             
-            # Strategy 2: Check by exact company name match (case-sensitive) - using new filter() syntax
+            # Strategy 2: Check by exact company name match (case-sensitive)
             if company_name and company_name.strip():
                 company_name_clean = company_name.strip()
-                query = collection_ref.filter("companyName", "==", company_name_clean).limit(1)
+                query = collection_ref.where("companyName", "==", company_name_clean).limit(1)
                 docs = query.stream()
                 for doc in docs:
                     logger.debug(f"Duplicate sponsorship found by exact company name: {doc.id}")
