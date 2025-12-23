@@ -70,7 +70,13 @@ def summarize_scraped_data(
     content_to_analyze = ""
     if isinstance(scraped_data, dict):
         # Reduced logging for performance - only log key info
-        logger.debug(f"Processing - Title: {scraped_data.get('job_title', 'N/A')[:50]}, Company: {scraped_data.get('company_name', 'N/A')[:50]}, Content: {len(str(scraped_data.get('text_content', '')))} chars")
+        # Handle None values safely before slicing
+        job_title = scraped_data.get('job_title') or 'N/A'
+        company_name = scraped_data.get('company_name') or 'N/A'
+        job_title_str = str(job_title)[:50] if job_title != 'N/A' else 'N/A'
+        company_name_str = str(company_name)[:50] if company_name != 'N/A' else 'N/A'
+        text_content_len = len(str(scraped_data.get('text_content', '')))
+        logger.debug(f"Processing - Title: {job_title_str}, Company: {company_name_str}, Content: {text_content_len} chars")
         
         # Combine all relevant fields - prioritize raw scraped data
         content_parts = []
