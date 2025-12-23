@@ -1,20 +1,21 @@
 from __future__ import annotations
 
-
-
 import asyncio
-
 import json
-
 import os
-
 import time
-
 import re
-
+import logging
 from datetime import datetime
-
 from typing import Dict, Any, List, Optional
+
+# Setup logging with environment variable control
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
+logging.basicConfig(
+    level=getattr(logging, LOG_LEVEL, logging.INFO),
+    format='%(levelname)s: %(message)s'
+)
+logger = logging.getLogger(__name__)
 
 
 
@@ -94,7 +95,7 @@ from utils import (
     scrape_website_custom,
     is_authorized_sponsor,
 )
-from agents import build_resume_parser, build_scraper, build_scorer, build_summarizer, build_orchestrator
+from agents import build_resume_parser, build_scraper, build_scorer, build_summarizer
 
 from pyngrok import ngrok, conf as ngrok_conf
 
@@ -615,7 +616,10 @@ def is_valid_company_name(name: str) -> bool:
         'leveraging', 'transforming', 'using', 'through', 'description', 'about',
         'job', 'position', 'role', 'opportunity', 'career', 'work', 'employment',
         'posting', 'listing', 'advertisement', 'ad', 'vacancy', 'opening',
-        'applicant', 'candidate', 'worker', 'employee', 'staff', 'personnel'
+        'applicant', 'candidate', 'worker', 'employee', 'staff', 'personnel',
+        'skip to main content', 'skip navigation', 'skip to content', 'main content',
+        'navigation', 'menu', 'home', 'about us', 'contact us', 'privacy policy',
+        'terms of service', 'cookie policy', 'accessibility', 'sitemap'
     ]
     name_lower = name.lower().strip()
     # Reject if the entire name is just an invalid word
@@ -662,7 +666,10 @@ def is_valid_company_name(name: str) -> bool:
 
 def extract_company_name_from_content(content: str, fallback_company: Optional[str] = None) -> Optional[str]:
     """
-    Extract company name from scraped content using multiple strategies.
+    [LEGACY] Extract company name from scraped content using regex patterns.
+    
+    NOTE: This function is kept for backward compatibility and fallback scenarios.
+    Primary extraction now uses OpenAI API via extract_company_and_title_from_raw_data().
     
     Args:
         content: Scraped job content
@@ -2355,78 +2362,52 @@ Extract every skill, tool, and technology mentioned. Calculate total years from 
 
             
 
-            # Try to extract company name from job_data BEFORE creating scraped_data
-            # This helps the summarizer by providing initial hints
-            pre_extracted_company = None
-            try:
-                # Try multiple extraction strategies
-                # Strategy 0: Look for company name at the very beginning (common format: "Company Name\n\nJob Title")
-                first_lines = job_data[:500].split('\n')[:5]  # First 5 lines
-                for line in first_lines:
-                    line = line.strip()
-                    if line and len(line) > 3 and len(line) < 80:
-                        # Check if it looks like a company name (starts with capital, no verbs)
-                        if line[0].isupper() and is_valid_company_name(line):
-                            # Additional check: should not be a job title (common job title words)
-                            job_title_words = ['engineer', 'developer', 'manager', 'analyst', 'specialist', 'lead', 'senior', 'junior', 'intern']
-                            if not any(word in line.lower() for word in job_title_words):
-                                cleaned = clean_company_name(line)
-                                if cleaned and is_valid_company_name(cleaned):
-                                    pre_extracted_company = cleaned
-                                    print(f"[Company Extraction] Pre-extracted from beginning: {pre_extracted_company}")
-                                    break
-                
-                # Strategy 1: Look for "by [Company]" pattern (common in job postings)
-                # But be more restrictive - require company suffix or longer names
-                by_pattern = r'(?:by|from|via)\s+([A-Z][A-Za-z0-9\s&.,\-]{3,60}(?:\s+(?:Ltd|Limited|Inc|LLC|Corp|Corporation|Group|Holdings|Technology|Solutions|Services|Pvt\.?\s*Ltd\.?|Systems|Global|International))?)'
-                by_match = re.search(by_pattern, job_data[:2000], re.IGNORECASE)
-                if by_match:
-                    potential_company = by_match.group(1).strip()
-                    cleaned = clean_company_name(potential_company)
-                    # Validate with is_valid_company_name to reject invalid names like "hirer"
-                    if cleaned and is_valid_company_name(cleaned):
-                        pre_extracted_company = cleaned
-                        print(f"[Company Extraction] Pre-extracted from 'by' pattern: {pre_extracted_company}")
-                
-                # Strategy 2: Use extract_company_name_from_content if Strategy 1 didn't work
-                if not pre_extracted_company:
-                    extracted = extract_company_name_from_content(job_data[:2000], None)
-                    if extracted and extracted != "Company name not available in posting" and len(extracted) >= 2:
-                        pre_extracted_company = extracted
-                        print(f"[Company Extraction] Pre-extracted from content: {pre_extracted_company}")
-                
-                # Strategy 3: Try sponsorship_checker extract_company_name
-                if not pre_extracted_company:
-                    try:
-                        from sponsorship_checker import extract_company_name
-                        extracted = extract_company_name(job_data[:2000])
-                        if extracted:
-                            cleaned = clean_company_name(extracted)
-                            if cleaned and len(cleaned) >= 2:
-                                pre_extracted_company = cleaned
-                                print(f"[Company Extraction] Pre-extracted from sponsorship_checker: {pre_extracted_company}")
-                    except Exception as e:
-                        print(f"[Company Extraction] Error using sponsorship_checker: {e}")
-            except Exception as e:
-                print(f"[Company Extraction] Error in pre-extraction: {e}")
+            # IMPORTANT: Send raw scraped data directly to OpenAI to extract company name and job title
+            # Do NOT perform any preprocessing, parsing, or extraction - send it as-is to OpenAI
+            print(f"[EXTRACT] Extracting from {len(job_data)} chars via OpenAI")
             
-            # Create scraped_data structure for summarizer
+            openai_key = settings.openai_api_key or os.getenv("OPENAI_API_KEY")
+            if not openai_key:
+                raise ValueError("OpenAI API key is required for extraction")
+            
+            # Use the new function that sends raw data directly to OpenAI
+            from job_extractor import extract_company_and_title_from_raw_data
+            
+            # Extract company name and job title directly from raw scraped data using OpenAI
+            extracted_info = await asyncio.to_thread(
+                extract_company_and_title_from_raw_data,
+                job_data,  # Send raw scraped data as-is, no preprocessing
+                openai_key,
+                settings.model_name
+            )
+            
+            # Get extracted values from OpenAI
+            extracted_company = extracted_info.get("company_name")
+            extracted_title = extracted_info.get("job_title")
+            
+            print(f"[EXTRACT] OpenAI → Company: {extracted_company[:50] if extracted_company else 'None'}, Title: {extracted_title[:50] if extracted_title else 'None'}")
+            
+            # Use extracted values (fallback to raw_job_title if OpenAI didn't extract title)
+            final_extracted_company = extracted_company
+            final_extracted_title = extracted_title or raw_job_title
+            
+            # Create scraped_data structure for summarizer (using OpenAI-extracted values)
 
             scraped_data = {
 
                 "url": job_link,
 
-                "job_title": raw_job_title,
-                "company_name": pre_extracted_company,  # Pre-extracted company name to help summarizer
+                "job_title": final_extracted_title,  # Use OpenAI-extracted title
+                "company_name": final_extracted_company,  # Use OpenAI-extracted company name
                 "location": None,
 
-                "description": job_data,
+                "description": job_data,  # Keep raw job_data for description
 
                 "qualifications": None,
 
                 "suggested_skills": None,
 
-                "text_content": job_data,
+                "text_content": job_data,  # Keep raw job_data for text_content
 
                 "html_length": len(job_data)
 
@@ -2434,22 +2415,12 @@ Extract every skill, tool, and technology mentioned. Calculate total years from 
 
             
 
-            # Use summarizer to process the job data
-
-            openai_key = settings.openai_api_key or os.getenv("OPENAI_API_KEY")
-
-            if not openai_key:
-
-                raise ValueError("OpenAI API key is required for summarization")
+            # Use summarizer to process the job data (for description and other details)
+            # Note: Company name and job title are already extracted by OpenAI above
 
             
 
-            print(f"Processing job: {raw_job_title}")
-            print(f"Job data length: {len(job_data)} characters")
-
-            
-
-            # Run summarizer in thread pool
+            # Run summarizer in thread pool (for description, skills, etc.)
 
             summarized_data = await asyncio.to_thread(
 
@@ -2463,94 +2434,27 @@ Extract every skill, tool, and technology mentioned. Calculate total years from 
 
             
 
-            # Extract and clean job title - prioritize summarized data, then raw title, then extraction
-            summarized_title = summarized_data.get("job_title")
-            final_job_title = None
+            # Use OpenAI-extracted values as primary source (already extracted above)
+            # Only use summarized data as fallback if OpenAI extraction failed
+            final_job_title = final_extracted_title or summarized_data.get("job_title") or raw_job_title or "Job title not available in posting"
+            final_company = final_extracted_company or summarized_data.get("company_name") or "Company name not available in posting"
             
-            # Priority 1: Use summarized title if available and valid
-            if summarized_title:
-                cleaned = clean_job_title(summarized_title)
-                if cleaned and len(cleaned) >= 5:
-                    final_job_title = cleaned
+            # Clean the final values
+            if final_job_title and final_job_title != "Job title not available in posting":
+                cleaned_title = clean_job_title(final_job_title)
+                if cleaned_title and len(cleaned_title) >= 5:
+                    final_job_title = cleaned_title
+                else:
+                    final_job_title = raw_job_title or "Job title not available in posting"
             
-            # Priority 2: Use raw title if summarized title not available
-            if not final_job_title:
-                cleaned = clean_job_title(raw_job_title)
-                if cleaned and len(cleaned) >= 5:
-                    final_job_title = cleaned
+            if final_company and final_company != "Company name not available in posting":
+                cleaned_company = clean_company_name(final_company)
+                if cleaned_company and len(cleaned_company) >= 2 and cleaned_company.lower() not in ["not specified", "unknown", "none"]:
+                    final_company = cleaned_company
+                else:
+                    final_company = "Company name not available in posting"
             
-            # Priority 3: Try extraction from content (but be more selective)
-            if not final_job_title:
-                # Only extract if we can find a clear pattern near the beginning
-                first_500 = job_data[:500] if job_data else ""
-                extracted = extract_job_title_from_content(first_500, None)
-                if extracted and extracted != "Job title not available in posting" and len(extracted) >= 5:
-                    final_job_title = extracted
-            
-            # Final fallback
-            if not final_job_title:
-                final_job_title = "Job title not available in posting"
-            
-            # Extract and clean company name - prioritize summarized data, then pre-extracted
-            summarized_company = summarized_data.get("company_name")
-            final_company = None
-            
-            # Priority 1: Use summarized company if available and valid
-            if summarized_company:
-                cleaned = clean_company_name(summarized_company)
-                if cleaned and len(cleaned) >= 2 and cleaned.lower() not in ["not specified", "unknown", "none"]:
-                    final_company = cleaned
-                    print(f"[Company Extraction] Using summarized company: {final_company}")
-            
-            # Priority 2: Use pre-extracted company if summarized didn't work
-            if not final_company and pre_extracted_company:
-                cleaned = clean_company_name(pre_extracted_company)
-                if cleaned and len(cleaned) >= 2:
-                    final_company = cleaned
-                    print(f"[Company Extraction] Using pre-extracted company: {final_company}")
-            
-            # Priority 3: Try extracting from job title (e.g., "Johnsons Volkswagen Liverpool Service Advisor")
-            if not final_company:
-                title_parts = raw_job_title.split(" - ")[0]  # Remove " - job post" suffix
-                location_keywords = ["liverpool", "london", "manchester", "birmingham", "leeds", "glasgow", "edinburgh", "bristol", "cardiff"]
-                for loc in location_keywords:
-                    if loc.lower() in title_parts.lower():
-                        parts = re.split(f"\\b{loc}\\b", title_parts, flags=re.IGNORECASE)
-                        if len(parts) > 0 and parts[0].strip():
-                            potential_company = parts[0].strip()
-                            cleaned_company = clean_company_name(potential_company)
-                            if cleaned_company and len(cleaned_company) >= 2:
-                                final_company = cleaned_company
-                                print(f"[Company Extraction] Extracted from title: {final_company}")
-                                break
-            
-            # Priority 4: Try extraction from content (first 2000 chars)
-            if not final_company:
-                first_2000 = job_data[:2000] if job_data else ""
-                extracted = extract_company_name_from_content(first_2000, None)
-                if extracted and extracted != "Company name not available in posting" and len(extracted) >= 2:
-                    final_company = extracted
-                    print(f"[Company Extraction] Extracted from content: {final_company}")
-            
-            # Priority 5: Try sponsorship_checker
-            if not final_company:
-                try:
-                    from sponsorship_checker import extract_company_name
-                    extracted = extract_company_name(job_data[:2000] if job_data else "")  # Limit to first 2000 chars
-                    if extracted:
-                        cleaned = clean_company_name(extracted)
-                        if cleaned and len(cleaned) >= 2:
-                            final_company = cleaned
-                            print(f"[Company Extraction] Extracted from sponsorship_checker: {final_company}")
-                except Exception as e:
-                    print(f"[Company Extraction] Error extracting from job data: {e}")
-            
-            # Final fallback
-            if not final_company:
-                final_company = "Company name not available in posting"
-            
-            print(f"[Job Info] Final job title: {final_job_title}")
-            print(f"[Job Info] Final company: {final_company}")
+            print(f"[FINAL] Title: {final_job_title[:60]}, Company: {final_company[:60]}")
             
             # Convert experience_level to string if it's a dict
             experience_level = summarized_data.get("required_experience")
@@ -4161,12 +4065,21 @@ Be honest about the fit level based on the score.
                             else:
                                 print(f"[Sponsorship] [DEBUG] Reusing existing Firebase service instance")
                             
-                            # Prepare sponsorship data dictionary (use enhanced summary)
+                            # Prepare sponsorship data dictionary (use updated summary from top_job)
+                            # Use top_job.summary which was just updated, or fall back to sponsorship_result summary
+                            sponsorship_summary = None
+                            if matched_jobs and len(matched_jobs) > 0 and matched_jobs[0].summary:
+                                sponsorship_summary = matched_jobs[0].summary
+                            elif sponsorship_result.get('summary'):
+                                sponsorship_summary = sponsorship_result.get('summary')
+                            else:
+                                sponsorship_summary = 'No sponsorship information available'
+                            
                             sponsorship_dict = {
                                 "company_name": sponsorship_result.get('company_name'),
                                 "sponsors_workers": sponsorship_result.get('sponsors_workers', False),
                                 "visa_types": sponsorship_result.get('visa_types'),
-                                "summary": enhanced_summary  # Use enhanced summary with company info
+                                "summary": sponsorship_summary  # Use updated summary with company info
                             }
                             
                             # Prepare job info (same structure as used for job_applications)
@@ -6718,15 +6631,15 @@ async def playwright_scrape(
                 if openai_key:
                     def search_with_duckduckgo(search_url: str) -> Dict[str, Any]:
                         """Search for job information using DuckDuckGo."""
-                        from phi.agent import Agent
-                        from phi.model.openai import OpenAIChat
-                        from phi.tools.duckduckgo import DuckDuckGo
+                        from agents import Agent, get_model_config
+                        from langchain_community.tools import DuckDuckGoSearchRun
                         
                         # Create search agent
+                        model = get_model_config("gpt-4o-mini", default_temperature=0)
                         search_agent = Agent(
                             name="Job Search Agent",
-                            model=OpenAIChat(id="gpt-4o-mini", api_key=openai_key),
-                            tools=[DuckDuckGo()],
+                            model=model,
+                            tools=[DuckDuckGoSearchRun()],
                             instructions=[
                                 "Search for information about this job posting URL.",
                                 "Extract: job title, company name, job description, requirements, and location.",

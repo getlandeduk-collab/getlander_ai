@@ -2,7 +2,7 @@
 Deterministic Job-Resume Matching System
 
 This package provides a two-step matching system:
-1. LLM extraction of structured data (PhiData + GPT-4)
+1. LLM extraction of structured data (LangGraph + GPT-4)
 2. Deterministic mathematical scoring
 
 Usage:

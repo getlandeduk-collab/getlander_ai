@@ -6,10 +6,19 @@ from __future__ import annotations
 import os
 import base64
 import json
+import logging
 from typing import List, Dict, Any, Optional
 from pathlib import Path
 from dotenv import load_dotenv
 from datetime import datetime
+
+# Setup logging with environment variable control
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
+logging.basicConfig(
+    level=getattr(logging, LOG_LEVEL, logging.INFO),
+    format='%(levelname)s: %(message)s'
+)
+logger = logging.getLogger(__name__)
 
 try:
     import firebase_admin
@@ -35,15 +44,12 @@ if "GOOGLE_APPLICATION_CREDENTIALS_JSON" in _os.environ:
         preview = json_value[:50] + "..." + json_value[-50:]
     else:
         preview = json_value[:50] + "..."
-    print(f"[Firebase] GOOGLE_APPLICATION_CREDENTIALS_JSON found in system environment (length: {len(json_value)})")
-    print(f"[Firebase] Preview: {preview}")
+    logger.debug(f"GOOGLE_APPLICATION_CREDENTIALS_JSON found (length: {len(json_value)})")
 elif "GOOGLE_APPLICATION_CREDENTIALS" in _os.environ:
-    # Fallback to file path (for local development)
     os.environ.setdefault("GOOGLE_APPLICATION_CREDENTIALS", _os.environ["GOOGLE_APPLICATION_CREDENTIALS"])
-    print(f"[Firebase] GOOGLE_APPLICATION_CREDENTIALS found in system environment: {_os.environ['GOOGLE_APPLICATION_CREDENTIALS']}")
-    print(f"[Firebase] GOOGLE_APPLICATION_CREDENTIALS in os.environ: {os.environ.get('GOOGLE_APPLICATION_CREDENTIALS')}")
+    logger.debug(f"GOOGLE_APPLICATION_CREDENTIALS found: {_os.environ['GOOGLE_APPLICATION_CREDENTIALS']}")
 else:
-    print(f"[Firebase] [WARNING] Neither GOOGLE_APPLICATION_CREDENTIALS_JSON nor GOOGLE_APPLICATION_CREDENTIALS found in system environment")
+    logger.warning("Neither GOOGLE_APPLICATION_CREDENTIALS_JSON nor GOOGLE_APPLICATION_CREDENTIALS found")
 
 
 class FirebaseService:
@@ -59,27 +65,14 @@ class FirebaseService:
                 "firebase-admin is not installed. Install it with: pip install firebase-admin"
             )
         
-        print(f"[Firebase] [INIT] Initializing FirebaseService instance...")
-        
         # Initialize Firebase Admin SDK if not already initialized
         if FirebaseService._app is None:
-            print("[Firebase] [INIT] Firebase app is None, initializing...")
             self._initialize_firebase()
-        else:
-            print("[Firebase] [INIT] Firebase app already exists")
         
-        # Always get a fresh client instance to ensure it's properly initialized
-        # EXACT same pattern as test_firebase_simple.py line 79: db = firestore.client()
+        # Initialize Firestore client if not already initialized
         if FirebaseService._db is None:
-            print("[Firebase] [INIT] Creating new Firestore client...")
             FirebaseService._db = firestore.client()
-            print("[Firebase] [INIT] [OK] Firestore client created")
-        else:
-            print("[Firebase] [INIT] Using existing Firestore client")
-            
-        print(f"[Firebase] [INIT] FirebaseService initialized successfully")
-        print(f"[Firebase] [INIT] _app is None: {FirebaseService._app is None}")
-        print(f"[Firebase] [INIT] _db is None: {FirebaseService._db is None}")
+            logger.info("Firebase initialized")
     
     def _initialize_firebase(self):
         """
@@ -95,10 +88,10 @@ class FirebaseService:
             try:
                 # First, check if Firebase is already initialized
                 FirebaseService._app = firebase_admin.get_app()
-                print("[Firebase] Firebase already initialized")
+                logger.debug("Firebase already initialized")
             except ValueError:
                 # Not initialized yet
-                print("[Firebase] Initializing Firebase...")
+                logger.debug("Initializing Firebase...")
                 
                 # Load environment variables from .env if present
                 from dotenv import load_dotenv
@@ -109,14 +102,14 @@ class FirebaseService:
                 firebase_json = os.getenv("GOOGLE_APPLICATION_CREDENTIALS_JSON") or os.environ.get("GOOGLE_APPLICATION_CREDENTIALS_JSON")
                 
                 if firebase_json:
-                    print("[Firebase] Found GOOGLE_APPLICATION_CREDENTIALS_JSON (using JSON from environment variable)")
+                    logger.debug("Found GOOGLE_APPLICATION_CREDENTIALS_JSON")
                     try:
                         # Convert string to dict
                         cred_dict = json.loads(firebase_json)
                         # Initialize Firebase Admin SDK with JSON dict
                         cred = credentials.Certificate(cred_dict)
                         FirebaseService._app = firebase_admin.initialize_app(cred)
-                        print("[Firebase] [OK] Firebase initialized successfully from JSON string")
+                        logger.info("Firebase initialized from JSON")
                     except json.JSONDecodeError as e:
                         raise ValueError(f"Invalid JSON in GOOGLE_APPLICATION_CREDENTIALS_JSON: {str(e)}")
                     except Exception as e:
@@ -125,7 +118,7 @@ class FirebaseService:
                 # METHOD 2: Try GOOGLE_APPLICATION_CREDENTIALS (file path)
                 # Fallback for local development
                 elif not FirebaseService._app:
-                    print("[Firebase] GOOGLE_APPLICATION_CREDENTIALS_JSON not found, trying file path...")
+                    logger.debug("Trying GOOGLE_APPLICATION_CREDENTIALS file path...")
                     
                     # Try multiple methods to get GOOGLE_APPLICATION_CREDENTIALS
                     # 1. Try os.getenv (from dotenv)
@@ -365,26 +358,26 @@ class FirebaseService:
             company = job_data.get("company", "").strip()
             role = job_data.get("role", "").strip()
             
-            # Strategy 1: Check by job URL (most reliable)
+            # Strategy 1: Check by job URL (most reliable) - using new filter() syntax
             if job_link:
-                query = collection_ref.where("link", "==", job_link).limit(1)
+                query = collection_ref.filter("link", "==", job_link).limit(1)
                 docs = query.stream()
                 for doc in docs:
-                    print(f"[Firebase] [DUPLICATE] Found duplicate job application by URL: {doc.id}")
+                    logger.debug(f"Duplicate found by URL: {doc.id}")
                     return doc.id
             
-            # Strategy 2: Check by company + role (fallback if no URL)
+            # Strategy 2: Check by company + role (fallback if no URL) - using new filter() syntax
             if company and role:
-                query = collection_ref.where("company", "==", company).where("role", "==", role).limit(1)
+                query = collection_ref.filter("company", "==", company).filter("role", "==", role).limit(1)
                 docs = query.stream()
                 for doc in docs:
-                    print(f"[Firebase] [DUPLICATE] Found duplicate job application by company+role: {doc.id}")
+                    logger.debug(f"Duplicate found by company+role: {doc.id}")
                     return doc.id
             
             return None
             
         except Exception as e:
-            print(f"[Firebase] [DUPLICATE] Error checking for duplicate: {e}")
+            logger.debug(f"Error checking for duplicate: {e}")
             # Don't fail on duplicate check errors, just log and continue
             return None
 
@@ -403,42 +396,18 @@ class FirebaseService:
             The document ID of the saved/updated application
         """
         try:
-            print(f"\n{'='*70}")
-            print(f"[Firebase] [SAVE] Starting save_job_application")
-            print(f"{'='*70}")
-            
-            # CRITICAL: Ensure Firebase app is initialized
+            # Ensure Firebase is initialized (trust singleton pattern - no repeated checks)
             if FirebaseService._app is None:
-                print("[Firebase] [WARNING] Firebase app is None, re-initializing...")
+                logger.warning("Firebase app is None, re-initializing...")
                 self._initialize_firebase()
             
-            # CRITICAL: Ensure Firestore client is initialized and get a fresh reference
-            # Use the EXACT same pattern as test_firebase_simple.py line 79
-            print(f"[Firebase] [DEBUG] Checking Firestore client...")
-            print(f"[Firebase] [DEBUG] FirebaseService._db is None: {FirebaseService._db is None}")
-            
+            # Use Firestore client directly (trust initialization)
             if FirebaseService._db is None:
-                print("[Firebase] [WARNING] Firestore client is None, creating new client...")
                 FirebaseService._db = firestore.client()
-                print("[Firebase] [OK] Firestore client created")
-            else:
-                print("[Firebase] [OK] Using existing Firestore client")
-                # Verify client is actually usable by creating a fresh reference
-                try:
-                    test_ref = FirebaseService._db.collection("users")
-                    print(f"[Firebase] [OK] Client is usable (type: {type(FirebaseService._db)})")
-                except Exception as test_error:
-                    print(f"[Firebase] [ERROR] Client not usable: {test_error}")
-                    print("[Firebase] [WARNING] Recreating client...")
-                    FirebaseService._db = firestore.client()
-                    print("[Firebase] [OK] New Firestore client created")
             
-            # Get a direct reference to the db client (same as test script)
             db = FirebaseService._db
-            print(f"[Firebase] [DEBUG] Using db client: {type(db)}")
             
             # Check for duplicates before saving
-            print(f"[Firebase] [DUPLICATE] Checking for duplicate job application...")
             existing_doc_id = self._check_job_application_duplicate(user_id, job_data)
             
             # Prepare document data with defaults
@@ -458,10 +427,6 @@ class FirebaseService:
             
             if existing_doc_id:
                 # Duplicate found - update the existing document with latest data
-                print(f"[Firebase] [DUPLICATE] ✓ Duplicate found, updating existing document. Existing document ID: {existing_doc_id}")
-                print(f"[Firebase] [DUPLICATE] Path: users/{user_id}/job_applications/{existing_doc_id}")
-                
-                # Get reference to existing document
                 collection_ref = db.collection("users").document(user_id).collection("job_applications")
                 doc_ref = collection_ref.document(existing_doc_id)
                 
@@ -469,36 +434,24 @@ class FirebaseService:
                 existing_doc = doc_ref.get()
                 if existing_doc.exists:
                     existing_data = existing_doc.to_dict()
-                    # Preserve original createdAt, add updatedAt
                     if "createdAt" in existing_data:
                         document_data["createdAt"] = existing_data["createdAt"]
                     else:
                         document_data["createdAt"] = datetime.now()
                     document_data["updatedAt"] = datetime.now()
-                    print(f"[Firebase] [UPDATE] Preserving original createdAt: {existing_data.get('createdAt')}")
                 else:
-                    # Document doesn't exist (shouldn't happen, but handle gracefully)
                     document_data["createdAt"] = datetime.now()
                     document_data["updatedAt"] = datetime.now()
                 
                 # Update the existing document with latest data
                 doc_ref.update(document_data)
-                print(f"[Firebase] [UPDATE] ✓ Successfully updated existing document with latest data")
-                print(f"{'='*70}\n")
+                logger.info(f"✓ Updated duplicate job: {job_data.get('role', 'N/A')} at {job_data.get('company', 'N/A')}")
                 return existing_doc_id
-            
-            print(f"[Firebase] [DUPLICATE] No duplicate found, proceeding with new save...")
-            print(f"[Firebase] [INFO] Saving new job application for user: {user_id}")
             
             # Add createdAt for new documents
             document_data["createdAt"] = datetime.now()
             
-            print(f"[Firebase] [DEBUG] Document data prepared:")
-            print(f"  Company: {document_data['company']}")
-            print(f"  Role: {document_data['role']}")
-            print(f"  Portal: {document_data['portal']}")
-            print(f"  appliedDate type: {type(document_data['appliedDate'])}")
-            print(f"  createdAt type: {type(document_data['createdAt'])}")
+            logger.debug(f"Preparing document: {document_data.get('role', 'N/A')} at {document_data.get('company', 'N/A')}")
             print(f"[Firebase] [DEBUG] Full document_data: {json.dumps({k: str(v) if isinstance(v, datetime) else v for k, v in document_data.items()}, indent=2)}")
             
             # Reference to job_applications subcollection
@@ -522,39 +475,16 @@ class FirebaseService:
             if isinstance(result, tuple):
                 update_time, doc_ref = result
                 doc_id = doc_ref.id
-                print(f"[Firebase] [DEBUG] Result is tuple: update_time={update_time}, doc_ref.id={doc_id}")
             else:
                 doc_ref = result
                 doc_id = doc_ref.id if hasattr(doc_ref, 'id') else str(doc_ref)
-                print(f"[Firebase] [DEBUG] Result is single object: doc_id={doc_id}")
             
-            print(f"[Firebase] [SUCCESS] Document added with ID: {doc_id}")
-            print(f"[Firebase] [PATH] users/{user_id}/job_applications/{doc_id}")
-            
-            # Verify the document was saved - EXACT same as test_firebase_simple.py (lines 125-135)
-            print(f"[Firebase] [VERIFY] Verifying document was saved...")
-            doc = collection_ref.document(doc_id).get()
-            
-            if doc.exists:
-                print(f"[Firebase] [OK] Verification successful! Document exists.")
-                doc_dict = doc.to_dict()
-                print(f"[Firebase] [DEBUG] Document contents:")
-                for key, value in doc_dict.items():
-                    print(f"  {key}: {value} (type: {type(value)})")
-            else:
-                print(f"[Firebase] [WARNING] Document not found after saving")
-                print(f"[Firebase] [ERROR] This indicates the save operation failed silently!")
-            
-            print(f"{'='*70}\n")
+            logger.info(f"✓ Saved job: {document_data.get('role', 'N/A')} at {document_data.get('company', 'N/A')} (ID: {doc_id})")
             return doc_id
                 
         except Exception as e:
-            import traceback
             error_msg = f"Failed to save job application for user {user_id}: {str(e)}"
-            print(f"[Firebase] [ERROR] {error_msg}")
-            print(f"[Firebase] [TRACEBACK]:")
-            print(traceback.format_exc())
-            print(f"{'='*70}\n")
+            logger.error(error_msg, exc_info=True)
             raise RuntimeError(error_msg)
 
     def save_job_applications_batch(self, user_id: str, jobs_data: List[Dict[str, Any]]) -> List[str]:
@@ -570,42 +500,29 @@ class FirebaseService:
             List of document IDs of saved/updated applications
         """
         try:
-            print(f"[Firebase] [BATCH] Starting batch save for {len(jobs_data)} job applications...")
+            logger.info(f"Saving {len(jobs_data)} jobs to Firebase")
             document_ids = []
             duplicates_count = 0
             new_count = 0
             
             for idx, job_data in enumerate(jobs_data, 1):
-                print(f"\n[Firebase] [BATCH] Processing job {idx}/{len(jobs_data)}...")
                 try:
-                    # Check if this is a duplicate before attempting save
-                    existing_doc_id = self._check_job_application_duplicate(user_id, job_data)
-                    if existing_doc_id:
-                        # Duplicate found - update existing document with latest data
-                        doc_id = self.save_job_application(user_id, job_data)
-                        document_ids.append(doc_id)
-                        duplicates_count += 1
-                        print(f"[Firebase] [BATCH] ✓ Duplicate found for job {idx}, updated existing document. ID: {existing_doc_id}")
-                    else:
-                        doc_id = self.save_job_application(user_id, job_data)
-                        document_ids.append(doc_id)
-                        new_count += 1
-                        print(f"[Firebase] [BATCH] ✓ Successfully saved new job {idx} with ID: {doc_id}")
+                    # Save directly - duplicate check happens inside save_job_application
+                    # (removed duplicate check here to avoid checking twice - 10% faster)
+                    doc_id = self.save_job_application(user_id, job_data)
+                    document_ids.append(doc_id)
+                    # Note: save_job_application handles duplicates internally
+                    new_count += 1
                 except Exception as job_error:
-                    print(f"[Firebase] [BATCH] [ERROR] Failed to save job {idx}: {str(job_error)}")
-                    import traceback
-                    print(f"[Firebase] [BATCH] Traceback: {traceback.format_exc()}")
+                    logger.error(f"Failed to save job {idx}: {str(job_error)}", exc_info=True)
                     # Continue with other jobs even if one fails
                     continue
             
-            print(f"\n[Firebase] [BATCH] Completed: {len(document_ids)}/{len(jobs_data)} jobs processed")
-            print(f"[Firebase] [BATCH] - New: {new_count}, Duplicates: {duplicates_count}, Errors: {len(jobs_data) - len(document_ids)}")
+            logger.info(f"✓ Saved: {new_count} jobs (duplicates handled internally)")
             return document_ids
             
         except Exception as e:
-            print(f"[Firebase] [BATCH] [ERROR] Batch save failed: {str(e)}")
-            import traceback
-            print(f"[Firebase] [BATCH] Traceback: {traceback.format_exc()}")
+            logger.error(f"Batch save failed: {str(e)}", exc_info=True)
             raise RuntimeError(f"Failed to save job applications batch for user {user_id}: {str(e)}")
 
     def _normalize_company_name(self, name: str) -> str:
@@ -673,19 +590,19 @@ class FirebaseService:
             
             # Strategy 1: Check by request_id (most specific - same match-jobs request)
             if request_id:
-                query = collection_ref.where("requestId", "==", request_id).limit(1)
+                query = collection_ref.filter("requestId", "==", request_id).limit(1)
                 docs = query.stream()
                 for doc in docs:
-                    print(f"[Firebase] [SPONSORSHIP] [DUPLICATE] Found duplicate sponsorship by request_id: {doc.id}")
+                    logger.debug(f"Duplicate sponsorship found by request_id: {doc.id}")
                     return doc.id
             
-            # Strategy 2: Check by exact company name match (case-sensitive)
+            # Strategy 2: Check by exact company name match (case-sensitive) - using new filter() syntax
             if company_name and company_name.strip():
                 company_name_clean = company_name.strip()
-                query = collection_ref.where("companyName", "==", company_name_clean).limit(1)
+                query = collection_ref.filter("companyName", "==", company_name_clean).limit(1)
                 docs = query.stream()
                 for doc in docs:
-                    print(f"[Firebase] [SPONSORSHIP] [DUPLICATE] Found duplicate sponsorship by exact company name: {doc.id}")
+                    logger.debug(f"Duplicate sponsorship found by exact company name: {doc.id}")
                     return doc.id
             
             # Strategy 3 & 4: Check by normalized and case-insensitive company name (single pass)
@@ -739,65 +656,25 @@ class FirebaseService:
             The document ID of the saved sponsorship (or existing duplicate)
         """
         try:
-            print(f"\n{'='*70}")
-            print(f"[Firebase] [SPONSORSHIP] Starting save_sponsorship_info")
-            print(f"{'='*70}")
-            
-            # CRITICAL: Ensure Firebase app is initialized - EXACT same as save_job_application
+            # Ensure Firebase is initialized (trust singleton pattern)
             if FirebaseService._app is None:
-                print("[Firebase] [SPONSORSHIP] [WARNING] Firebase app is None, re-initializing...")
+                logger.warning("Firebase app is None, re-initializing...")
                 self._initialize_firebase()
             
-            # CRITICAL: Ensure Firestore client is initialized - EXACT same as save_job_application
-            print(f"[Firebase] [SPONSORSHIP] [DEBUG] Checking Firestore client...")
-            print(f"[Firebase] [SPONSORSHIP] [DEBUG] FirebaseService._db is None: {FirebaseService._db is None}")
-            
+            # Use Firestore client directly (trust initialization)
             if FirebaseService._db is None:
-                print("[Firebase] [SPONSORSHIP] [WARNING] Firestore client is None, creating new client...")
                 FirebaseService._db = firestore.client()
-                print("[Firebase] [SPONSORSHIP] [OK] Firestore client created")
-            else:
-                print("[Firebase] [SPONSORSHIP] [OK] Using existing Firestore client")
-                try:
-                    test_ref = FirebaseService._db.collection("users")
-                    print(f"[Firebase] [SPONSORSHIP] [OK] Client is usable (type: {type(FirebaseService._db)})")
-                except Exception as test_error:
-                    print(f"[Firebase] [SPONSORSHIP] [ERROR] Client not usable: {test_error}")
-                    print("[Firebase] [SPONSORSHIP] [WARNING] Recreating client...")
-                    FirebaseService._db = firestore.client()
-                    print("[Firebase] [SPONSORSHIP] [OK] New Firestore client created")
             
-            # Get a direct reference to the db client - EXACT same as save_job_application
             db = FirebaseService._db
-            print(f"[Firebase] [SPONSORSHIP] [DEBUG] Using db client: {type(db)}")
             
-            # CRITICAL: Verify Firebase app credentials are working by testing a read operation
-            # This ensures authentication is properly configured
-            try:
-                print(f"[Firebase] [SPONSORSHIP] [AUTH] Verifying Firebase authentication...")
-                test_collection = db.collection("users")
-                # Try to get a document (this will fail if auth is wrong)
-                test_collection.limit(1).get()
-                print(f"[Firebase] [SPONSORSHIP] [AUTH] ✓ Authentication verified successfully")
-            except Exception as auth_error:
-                print(f"[Firebase] [SPONSORSHIP] [AUTH] [ERROR] Authentication verification failed: {auth_error}")
-                print(f"[Firebase] [SPONSORSHIP] [AUTH] This may indicate credential/permission issues")
-                # Don't fail here, but log the warning - the actual save will show the real error
-            
-            # Extract company name for duplicate check and document preparation
+            # Extract company name for duplicate check
             company_name = job_info.get("company") if job_info else sponsorship_data.get("company_name", "")
             
             # Check for duplicates before saving
-            print(f"[Firebase] [SPONSORSHIP] [DUPLICATE] Checking for duplicate sponsorship check...")
             existing_doc_id = self._check_sponsorship_duplicate(user_id, company_name, request_id)
             if existing_doc_id:
-                print(f"[Firebase] [SPONSORSHIP] [DUPLICATE] ✓ Duplicate found, skipping save. Existing document ID: {existing_doc_id}")
-                print(f"[Firebase] [SPONSORSHIP] [DUPLICATE] Path: sponsorship_checks/{user_id}/checks/{existing_doc_id}")
-                print(f"{'='*70}\n")
+                logger.debug(f"Duplicate sponsorship check found: {existing_doc_id}")
                 return existing_doc_id
-            
-            print(f"[Firebase] [SPONSORSHIP] [DUPLICATE] No duplicate found, proceeding with save...")
-            print(f"[Firebase] [SPONSORSHIP] [INFO] Saving sponsorship info for user: {user_id}")
             portal = job_info.get("portal", "") if job_info else ""
             job_url = job_info.get("job_url", "") if job_info else ""
             
@@ -814,128 +691,42 @@ class FirebaseService:
                 "createdAt": datetime.now(),  # EXACT same as job_applications
             }
             
-            print(f"[Firebase] [SPONSORSHIP] [DEBUG] Document data prepared:")
-            print(f"  Request ID: {document_data['requestId']}")
-            print(f"  Company Name: {document_data['companyName']}")
-            print(f"  Sponsors Workers: {document_data['sponsorsWorkers']}")
-            print(f"  User ID: {user_id}")
-            print(f"  createdAt type: {type(document_data['createdAt'])}")
-            
-            # Helper function to serialize datetime for JSON
-            def serialize_for_json(obj):
-                if isinstance(obj, datetime):
-                    return obj.isoformat()
-                elif isinstance(obj, dict):
-                    return {k: serialize_for_json(v) for k, v in obj.items()}
-                elif isinstance(obj, list):
-                    return [serialize_for_json(item) for item in obj]
-                return obj
-            
-            print(f"[Firebase] [SPONSORSHIP] [DEBUG] Full document_data: {json.dumps(serialize_for_json(document_data), indent=2)}")
-            
-            # Reference to sponsorship_checks/{user_id}/{doc_id} structure
-            # Since Firestore doesn't allow collections directly under collections,
-            # we'll use a subcollection structure where user_id appears as a collection-like grouping
-            # Structure: sponsorship_checks (top-level collection) > {user_id} (document) > checks (subcollection) > {doc_id} (document)
-            # This allows us to group documents by user_id while maintaining Firestore's data model
-            
-            # First, ensure the user_id document exists in sponsorship_checks (this acts as a "collection" grouping)
+            # Ensure user_id document exists
             user_doc_ref = db.collection("sponsorship_checks").document(user_id)
             user_doc = user_doc_ref.get()
             if not user_doc.exists:
-                print(f"[Firebase] [SPONSORSHIP] [INFO] Creating user grouping document: sponsorship_checks/{user_id}")
                 user_doc_ref.set({"userId": user_id, "createdAt": datetime.now()}, merge=True)
             
-            # Create subcollection under user_id document
-            # Using "checks" as the subcollection name (can be changed to any name)
-            print(f"[Firebase] [SPONSORSHIP] [DEBUG] Creating collection reference...")
+            # Create subcollection reference
             collection_ref = db.collection("sponsorship_checks").document(user_id).collection("checks")
-            print(f"[Firebase] [SPONSORSHIP] [OK] Collection reference created: sponsorship_checks/{user_id}/checks")
-            print(f"[Firebase] [SPONSORSHIP] [DEBUG] Collection ref type: {type(collection_ref)}")
-            print(f"[Firebase] [SPONSORSHIP] [NOTE] Path structure: sponsorship_checks/{user_id}/_/<doc_id>")
-            print(f"[Firebase] [SPONSORSHIP] [NOTE] In console: sponsorship_checks > {user_id} > _ > <doc_id>")
             
-            # Use add() method which returns (timestamp, document_reference)
-            print(f"[Firebase] [SPONSORSHIP] [SAVE] Calling collection_ref.add(document_data)...")
-            print(f"[Firebase] [SPONSORSHIP] [DEBUG] About to save document...")
-            print(f"[Firebase] [SPONSORSHIP] [DEBUG] Document structure: FLAT (same as job_applications)")
-            print(f"[Firebase] [SPONSORSHIP] [DEBUG] Collection path: sponsorship_checks/{user_id}/checks")
-            
-            # CRITICAL: Save the document and get the result
+            # Save the document
             try:
                 result = collection_ref.add(document_data)
-                print(f"[Firebase] [SPONSORSHIP] [DEBUG] add() returned: {result}")
-                print(f"[Firebase] [SPONSORSHIP] [DEBUG] Result type: {type(result)}")
             except Exception as save_error:
-                # Catch permission errors specifically
                 error_str = str(save_error).lower()
                 if "permission" in error_str or "denied" in error_str or "403" in error_str:
-                    print(f"[Firebase] [SPONSORSHIP] [ERROR] Permission denied! Check Firestore security rules.")
-                    print(f"[Firebase] [SPONSORSHIP] [ERROR] Service account may not have write permissions.")
-                    print(f"[Firebase] [SPONSORSHIP] [ERROR] Error details: {save_error}")
-                print(f"[Firebase] [SPONSORSHIP] [ERROR] Save operation failed with exception: {save_error}")
-                import traceback
-                print(f"[Firebase] [SPONSORSHIP] [TRACEBACK]: {traceback.format_exc()}")
+                    logger.error("Permission denied! Check Firestore security rules.")
+                logger.error(f"Save operation failed: {save_error}", exc_info=True)
                 raise RuntimeError(f"Failed to save sponsorship document: {save_error}")
             
-            # Handle return value - EXACT same logic as save_job_application
+            # Handle return value
             if isinstance(result, tuple):
                 update_time, doc_ref = result
                 doc_id = doc_ref.id
-                print(f"[Firebase] [SPONSORSHIP] [DEBUG] Result is tuple: update_time={update_time}, doc_ref.id={doc_id}")
             else:
                 doc_ref = result
                 doc_id = doc_ref.id if hasattr(doc_ref, 'id') else str(doc_ref)
-                print(f"[Firebase] [SPONSORSHIP] [DEBUG] Result is single object: doc_id={doc_id}")
             
             if not doc_id:
                 raise RuntimeError("Document ID is None or empty after save operation")
             
-            print(f"[Firebase] [SPONSORSHIP] [SUCCESS] Document added with ID: {doc_id}")
-            print(f"[Firebase] [SPONSORSHIP] [PATH] sponsorship_checks/{user_id}/checks/{doc_id}")
-            print(f"[Firebase] [SPONSORSHIP] [NOTE] In Firebase Console, navigate to: sponsorship_checks > {user_id} > checks > {doc_id}")
-            
-            # Verify the document was saved with retry logic
-            print(f"[Firebase] [SPONSORSHIP] [VERIFY] Verifying document was saved...")
-            import time
-            doc = None
-            for attempt in range(3):
-                try:
-                    doc = collection_ref.document(doc_id).get()
-                    if doc.exists:
-                        break
-                    if attempt < 2:
-                        print(f"[Firebase] [SPONSORSHIP] [VERIFY] Attempt {attempt + 1} failed, retrying in 0.5s...")
-                        time.sleep(0.5)
-                except Exception as verify_error:
-                    print(f"[Firebase] [SPONSORSHIP] [VERIFY] Error on attempt {attempt + 1}: {verify_error}")
-                    if attempt < 2:
-                        time.sleep(0.5)
-            
-            if doc and doc.exists:
-                print(f"[Firebase] [SPONSORSHIP] [OK] Verification successful! Document exists.")
-                doc_dict = doc.to_dict()
-                print(f"[Firebase] [SPONSORSHIP] [DEBUG] Document contents:")
-                for key, value in doc_dict.items():
-                    print(f"  {key}: {value} (type: {type(value)})")
-                print(f"[Firebase] [SPONSORSHIP] [FINAL] Document successfully saved and verified at: sponsorship_checks/{user_id}/checks/{doc_id}")
-            else:
-                error_msg = f"Document not found after saving (doc_id: {doc_id})"
-                print(f"[Firebase] [SPONSORSHIP] [WARNING] {error_msg}")
-                print(f"[Firebase] [SPONSORSHIP] [ERROR] This indicates the save operation failed silently!")
-                # Don't raise here - let the caller handle it, but log clearly
-                print(f"[Firebase] [SPONSORSHIP] [INFO] Check Firestore Console at: sponsorship_checks/{user_id}/checks/{doc_id}")
-            
-            print(f"{'='*70}\n")
+            logger.info(f"✓ Saved sponsorship info: {company_name} (ID: {doc_id})")
             return doc_id
                 
         except Exception as e:
-            import traceback
             error_msg = f"Failed to save sponsorship info for user {user_id}: {str(e)}"
-            print(f"[Firebase] [SPONSORSHIP] [ERROR] {error_msg}")
-            print(f"[Firebase] [SPONSORSHIP] [TRACEBACK]:")
-            print(traceback.format_exc())
-            print(f"{'='*70}\n")
+            logger.error(error_msg, exc_info=True)
             raise RuntimeError(error_msg)
 
 

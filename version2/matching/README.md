@@ -13,7 +13,7 @@ A two-step matching system that combines LLM extraction with deterministic mathe
                        ▼
 ┌─────────────────────────────────────────────────────────────┐
 │              STEP 1: LLM EXTRACTION                          │
-│  (PhiData + GPT-4, temperature=0)                           │
+│  (LangGraph + GPT-4, temperature=0)                           │
 │                                                              │
 │  Extracts structured data:                                  │
 │  - Job: skills_required, skills_preferred, years_experience │

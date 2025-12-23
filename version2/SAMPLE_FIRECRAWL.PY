@@ -1,4 +1,4 @@
-from phi.agent import Agent
+from agents import Agent
 from firecrawl import FirecrawlApp
 import os
 from dotenv import load_dotenv

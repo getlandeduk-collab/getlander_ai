@@ -1,41 +1,20 @@
 """
 LLM Extraction Module
 
-Uses PhiData + GPT-4 to extract structured data from job descriptions and resumes.
+Uses LangGraph + GPT-4 to extract structured data from job descriptions and resumes.
 """
 
 import json
 import re
 import logging
 from typing import Dict, Any, Optional
-from phi.agent import Agent
-from phi.model.openai import OpenAIChat
+from agents import Agent, get_model_config
 from .config import LLM_CONFIG, SKILL_NORMALIZATIONS
 
 logger = logging.getLogger(__name__)
 
 
-def get_model_config(model_name: str, temperature: float = 0) -> Dict[str, Any]:
-    """
-    Get model configuration with temperature support check.
-    Some models don't support custom temperature.
-    """
-    config = {"id": model_name}
-    
-    # Models that don't support temperature customization
-    models_without_temperature = ["o1", "o1-mini", "o1-preview", "gpt-5-mini", "gpt-5"]
-    
-    model_lower = model_name.lower()
-    supports_temperature = not any(no_temp in model_lower for no_temp in models_without_temperature)
-    
-    if supports_temperature:
-        config["temperature"] = temperature
-    
-    # JSON mode support
-    if "gpt-4" in model_lower:
-        config["response_format"] = {"type": "json_object"}
-    
-    return config
+# Use get_model_config from agents module instead
 
 
 def normalize_skill(skill: str) -> str:
@@ -75,14 +54,14 @@ def extract_json_from_response(text: str) -> Optional[Dict[str, Any]]:
 
 
 def build_extraction_agent(model_name: str = None) -> Agent:
-    """Build PhiData agent for data extraction."""
+    """Build LangGraph agent for data extraction."""
     model_name = model_name or LLM_CONFIG["model"]
-    model_config = get_model_config(model_name, temperature=LLM_CONFIG["temperature"])
+    model = get_model_config(model_name, default_temperature=LLM_CONFIG["temperature"])
     
     return Agent(
         name="Data Extractor",
         role="Extract structured data from job descriptions and resumes",
-        model=OpenAIChat(**model_config),
+        model=model,
         instructions=[
             "Extract information in JSON format with no additional text or markdown.",
             "Return ONLY valid JSON with two keys: 'job' and 'resume'.",

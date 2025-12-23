@@ -3,13 +3,164 @@ from __future__ import annotations
 from typing import List, Dict, Any, Optional, Union
 import json
 import re
+import os
 
-from phi.agent import Agent
-from phi.model.openai import OpenAIChat
-from phi.tools.firecrawl import FirecrawlTools
+from langchain_openai import ChatOpenAI
+from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.tools import BaseTool
+from langchain_community.tools import DuckDuckGoSearchRun
+from langgraph.graph import StateGraph, END
+from langgraph.graph.message import add_messages
+from typing_extensions import TypedDict, Annotated
+import operator
+
+# Firecrawl tool wrapper (since FirecrawlTools from phidata doesn't exist in langchain)
+class FirecrawlTool(BaseTool):
+    name: str = "firecrawl_scrape"
+    description: str = "Scrape content from a URL using Firecrawl API"
+    
+    def __init__(self, api_key: str = None, **kwargs):
+        super().__init__(**kwargs)
+        self.api_key = api_key or os.getenv("FIRECRAWL_API_KEY")
+        try:
+            from firecrawl import FirecrawlApp
+            self.client = FirecrawlApp(api_key=self.api_key) if self.api_key else None
+        except ImportError:
+            self.client = None
+    
+    def _run(self, url: str) -> str:
+        """Scrape URL using Firecrawl."""
+        if not self.client:
+            return f"Error: Firecrawl API key not configured. URL: {url}"
+        try:
+            result = self.client.scrape_url(url)
+            return result.get('markdown', result.get('content', str(result)))
+        except Exception as e:
+            return f"Error scraping {url}: {str(e)}"
+    
+    async def _arun(self, url: str) -> str:
+        """Async scrape URL using Firecrawl."""
+        return self._run(url)
 
 
-def get_model_config(model_name: str, default_temperature: float = 0) -> Dict[str, Any]:
+# Agent wrapper class to maintain compatibility with phidata Agent interface
+class Agent:
+    """Wrapper class that mimics phidata Agent interface using LangChain/LangGraph."""
+    
+    def __init__(
+        self,
+        name: str = None,
+        role: str = None,
+        model: ChatOpenAI = None,
+        instructions: List[str] = None,
+        tools: List[BaseTool] = None,
+        show_tool_calls: bool = True,
+        markdown: bool = True,
+        response_format: Dict[str, Any] = None
+    ):
+        self.name = name or "Agent"
+        self.role = role or ""
+        self.model = model
+        self.instructions = instructions or []
+        self.tools = tools or []
+        self.show_tool_calls = show_tool_calls
+        self.markdown = markdown
+        self.response_format = response_format
+        
+        # Bind tools to model if available
+        if self.model and self.tools:
+            self.model_with_tools = self.model.bind_tools(self.tools)
+        else:
+            self.model_with_tools = self.model
+    
+    def run(self, input_data: Union[str, Dict[str, Any]], stream: bool = False) -> Union[str, Any]:
+        """Run the agent with input data."""
+        from langchain_core.messages import ToolMessage
+        
+        # Build system message from instructions
+        system_prompt = ""
+        if self.role:
+            system_prompt += f"Role: {self.role}\n\n"
+        if self.instructions:
+            system_prompt += "\n".join(self.instructions)
+        
+        # Prepare messages
+        messages = []
+        if system_prompt:
+            messages.append(SystemMessage(content=system_prompt))
+        
+        # Add input as human message
+        if isinstance(input_data, dict):
+            input_text = json.dumps(input_data, indent=2)
+        else:
+            input_text = str(input_data)
+        messages.append(HumanMessage(content=input_text))
+        
+        # Get response from model
+        if self.model_with_tools and self.tools:
+            # Use tool-calling model with iterative tool execution
+            max_iterations = 5  # Prevent infinite loops
+            iteration = 0
+            
+            while iteration < max_iterations:
+                response = self.model_with_tools.invoke(messages)
+                messages.append(response)
+                
+                # Check if model wants to call tools
+                if hasattr(response, 'tool_calls') and response.tool_calls:
+                    # Execute tools
+                    for tool_call in response.tool_calls:
+                        tool_name = tool_call.get('name', '') if isinstance(tool_call, dict) else getattr(tool_call, 'name', '')
+                        tool_args = tool_call.get('args', {}) if isinstance(tool_call, dict) else getattr(tool_call, 'args', {})
+                        tool_call_id = tool_call.get('id', '') if isinstance(tool_call, dict) else getattr(tool_call, 'id', '')
+                        
+                        # Find the tool
+                        tool = None
+                        for t in self.tools:
+                            if t.name == tool_name:
+                                tool = t
+                                break
+                        
+                        if tool:
+                            try:
+                                # Execute tool - handle both sync and async
+                                # For tools like FirecrawlTool that take a single string argument
+                                if isinstance(tool_args, dict):
+                                    # If tool expects a single positional arg (like URL), extract it
+                                    if len(tool_args) == 1:
+                                        # Get the first (and likely only) value
+                                        tool_result = tool._run(list(tool_args.values())[0])
+                                    else:
+                                        tool_result = tool._run(**tool_args)
+                                elif isinstance(tool_args, str):
+                                    tool_result = tool._run(tool_args)
+                                else:
+                                    tool_result = tool._run(tool_args)
+                                
+                                # Add tool result to messages
+                                messages.append(ToolMessage(
+                                    content=str(tool_result),
+                                    tool_call_id=tool_call_id
+                                ))
+                            except Exception as e:
+                                messages.append(ToolMessage(
+                                    content=f"Error executing tool {tool_name}: {str(e)}",
+                                    tool_call_id=tool_call_id
+                                ))
+                    iteration += 1
+                else:
+                    # No more tool calls, return final response
+                    return response.content or str(response)
+            
+            # If we hit max iterations, return the last response
+            return messages[-1].content if messages else str(response)
+        else:
+            # Simple model without tools
+            response = self.model.invoke(messages)
+            return response.content or str(response)
+
+
+def get_model_config(model_name: str, default_temperature: float = 0) -> ChatOpenAI:
     """
     Get model configuration with temperature support check.
     
@@ -21,10 +172,8 @@ def get_model_config(model_name: str, default_temperature: float = 0) -> Dict[st
         default_temperature: Desired temperature (only used if model supports it)
     
     Returns:
-        Dict with model configuration
+        ChatOpenAI model instance
     """
-    config = {"id": model_name}
-    
     # Models that don't support temperature customization
     models_without_temperature = [
         "o1", "o1-mini", "o1-preview", "o1-2024",
@@ -35,51 +184,38 @@ def get_model_config(model_name: str, default_temperature: float = 0) -> Dict[st
     model_lower = model_name.lower()
     supports_temperature = not any(no_temp in model_lower for no_temp in models_without_temperature)
     
+    # Build model kwargs
+    model_kwargs = {"model": model_name}
+    
     if supports_temperature:
-        config["temperature"] = default_temperature
+        model_kwargs["temperature"] = default_temperature
     
     # JSON mode support (only for certain models that support it)
     # Note: o1 models support JSON mode, but gpt-5 models may not
+    # IMPORTANT: When using response_format={"type": "json_object"}, the prompt MUST contain the word "json"
+    response_format = None
     if "gpt-4" in model_lower or ("o1" in model_lower and "gpt-5" not in model_lower):
-        config["response_format"] = {"type": "json_object"}
+        response_format = {"type": "json_object"}
+        model_kwargs["model_kwargs"] = {"response_format": response_format}
     
-    return config
+    return ChatOpenAI(**model_kwargs)
 
 
-def build_orchestrator(model_name: str) -> Agent:
-    """Orchestrator agent that manages workflow and provides final verdict."""
-    model_config = get_model_config(model_name, default_temperature=0)
-    return Agent(
-        name="Orchestrator",
-        role="Coordinate agents and manage job matching workflow",
-        model=OpenAIChat(**model_config),
-        instructions=[
-            "You coordinate the job matching process in this order:",
-            "1. Resume Parser extracts candidate profile",
-            "2. Job Scraper fetches each job posting details",
-            "3. Job Scorer evaluates each job against candidate profile",
-            "4. Summarizer generates final summary for top matches only",
-            "Ensure each agent receives proper context from previous steps.",
-            "Filter out jobs with match_score < 0.5 before summarization.",
-            "Provide clear, structured output with all agent results.",
-            "Never duplicate summaries - each job needs unique analysis.",
-        ],
-        show_tool_calls=True,
-        markdown=True,
-    )
+# Removed unused build_orchestrator function - not used in production code
 
 
 def build_resume_parser(model_name: str) -> Agent:
     """Agent that extracts structured information from resume text."""
-    model_config = get_model_config(model_name, default_temperature=0)
+    model = get_model_config(model_name, default_temperature=0)
     return Agent(
         name="Resume Parser",
         role="Extract and structure all information from resume OCR text",
-        model=OpenAIChat(**model_config),
+        model=model,
         instructions=[
             "Parse raw OCR text from resume and extract ALL information.",
             "You MUST return ONLY valid JSON (no markdown, no code blocks, no explanations).",
             "CRITICAL: Your response must be valid JSON that can be parsed directly.",
+            "IMPORTANT: Return your response as a JSON object.",
             "",
             "Extract these fields:",
             "- name: Full name of candidate",
@@ -108,16 +244,15 @@ def build_resume_parser(model_name: str) -> Agent:
 
 def build_scraper(api_key: str = None) -> Agent:
     """Agent that scrapes individual job postings."""
-    import os
     # Use provided api_key, or get from environment (same as SAMPLE_FIRECRAWL.PY)
     firecrawl_api_key = api_key or os.getenv("FIRECRAWL_API_KEY")
     model_name = os.getenv("OPENAI_MODEL", "gpt-4o")
-    model_config = get_model_config(model_name, default_temperature=0)
+    model = get_model_config(model_name, default_temperature=0)
     return Agent(
         name="Job Scraper",
         role="Extract complete job posting information from URLs",
-        tools=[FirecrawlTools(api_key=firecrawl_api_key, scrape=True, crawl=False)],  # Pass API key
-        model=OpenAIChat(**model_config),
+        tools=[FirecrawlTool(api_key=firecrawl_api_key)],  # Pass API key
+        model=model,
         instructions=[
             "Given a job URL, extract ALL available information. CRITICAL: You MUST extract the following REQUIRED fields:",
             "",
@@ -828,11 +963,11 @@ def build_scorer(model_name: str) -> Agent:
     Agent that evaluates job-candidate fit using AI reasoning.
     Uses strict prompting and validation to minimize hallucinations.
     """
-    model_config = get_model_config(model_name, default_temperature=0)
+    model = get_model_config(model_name, default_temperature=0)
     return Agent(
         name="Job Scorer",
         role="Evaluate candidate-job match accurately based on provided data only",
-        model=OpenAIChat(**model_config),
+        model=model,
         instructions=[
             "You are a precise job matching evaluator. Analyze ONLY the information provided.",
             "",
@@ -873,6 +1008,7 @@ def build_scorer(model_name: str) -> Agent:
             "- Count related skills: 'Data Annotation' job + candidate has 'TensorFlow, Pandas, OpenCV' = 3 requirements met",
             "",
             "OUTPUT FORMAT (MUST be valid JSON):",
+            "Return your response as a JSON object with the following structure:",
             "{",
             '  "match_score": 0.65,',
             '  "key_matches": ["Python", "TensorFlow", "Pandas", "Computer Vision", "Data Analysis"],',
@@ -880,6 +1016,7 @@ def build_scorer(model_name: str) -> Agent:
             '  "total_requirements": 10,',
             '  "reasoning": "Candidate has strong ML and Python skills relevant to data annotation. Experience with TensorFlow, Keras, and computer vision directly applies to ML data curation tasks. Meets experience and education requirements."',
             "}",
+            "CRITICAL: Your response must be valid JSON that can be parsed directly.",
             "",
             "REQUIREMENTS CALCULATION EXAMPLE:",
             "Job Description: 'Data Annotation for ML. Need Python, ML knowledge, 0-1 year exp, BE/BTech degree'",
@@ -909,17 +1046,17 @@ def build_scorer(model_name: str) -> Agent:
         ],
         show_tool_calls=True,
         markdown=False,
-        response_format={"type": "json_object"} if model_config.get("response_format") else None,
+        response_format={"type": "json_object"} if "gpt-4" in model_name.lower() or ("o1" in model_name.lower() and "gpt-5" not in model_name.lower()) else None,
     )
 
 
 def build_summarizer(model_name: str) -> Agent:
     """Agent that creates detailed job match summaries without hallucination."""
-    model_config = get_model_config(model_name, default_temperature=0.3)
+    model = get_model_config(model_name, default_temperature=0.3)
     return Agent(
         name="Summarizer",
         role="Generate accurate, unique summaries based only on provided data",
-        model=OpenAIChat(**model_config),
+        model=model,
         instructions=[
             "You receive: candidate_profile, job_details, and match_score.",
             "Write a unique 150-200 word summary that:",
@@ -961,105 +1098,4 @@ def build_summarizer(model_name: str) -> Agent:
     )
 
 
-# Usage example with proper workflow
-def process_job_matching(
-    resume_text: str,
-    job_urls: List[str],
-    model_name: str = "gpt-4o"
-) -> Dict[str, Any]:
-    """
-    Complete job matching workflow.
-    
-    Args:
-        resume_text: OCR-extracted text from resume
-        job_urls: List of job posting URLs
-        model_name: OpenAI model to use
-    
-    Returns:
-        Dictionary with candidate profile and matched jobs
-    """
-    # Initialize agents
-    parser = build_resume_parser(model_name)
-    scraper = build_scraper()
-    scorer = build_scorer(model_name)
-    summarizer = build_summarizer(model_name)
-    
-    # Step 1: Parse resume
-    print("=" * 80)
-    print("📄 RESUME PARSER AGENT - Extracting candidate profile")
-    print("=" * 80)
-    candidate_profile = parser.run(resume_text)
-    print(f"[PARSER OUTPUT]: {candidate_profile}")
-    
-    matched_jobs = []
-    
-    # Step 2-4: Process each job
-    for idx, job_url in enumerate(job_urls, 1):
-        print("\n" + "=" * 80)
-        print(f"🔍 JOB SCRAPER AGENT - Processing job {idx}/{len(job_urls)}")
-        print("=" * 80)
-        
-        # Scrape job details
-        job_details = scraper.run(f"Scrape job posting from: {job_url}")
-        print(f"[SCRAPER OUTPUT for {job_url}]:\n{job_details}\n")
-        
-        # Score the match
-        print("=" * 80)
-        print(f"🤖 JOB SCORER AGENT - Calculating match score for job {idx}")
-        print("=" * 80)
-        score_input = {
-            "candidate_profile": candidate_profile,
-            "job_details": job_details,
-            "job_url": job_url
-        }
-        match_result = scorer.run(json.dumps(score_input))
-        print(f"[SCORER OUTPUT]:\n{match_result}\n")
-        
-        # Parse score result
-        try:
-            score_data = json.loads(match_result) if isinstance(match_result, str) else match_result
-            match_score = score_data.get("match_score", 0.0)
-            
-            # Only summarize if match score is reasonable
-            if match_score >= 0.5:
-                print("=" * 80)
-                print(f"📝 SUMMARIZER AGENT - Generating summary for job {idx}")
-                print("=" * 80)
-                summary_input = {
-                    "candidate_profile": candidate_profile,
-                    "job_details": job_details,
-                    "match_score": match_score,
-                    "job_url": job_url
-                }
-                summary = summarizer.run(json.dumps(summary_input))
-                print(f"[SUMMARIZER OUTPUT]:\n{summary}\n")
-            else:
-                summary = f"Low match score ({match_score:.1%}). Candidate skills don't align well with job requirements."
-            
-            matched_jobs.append({
-                "rank": idx,
-                "job_url": job_url,
-                "match_score": match_score,
-                "summary": summary,
-                **score_data
-            })
-            
-        except Exception as e:
-            print(f"Error processing job {idx}: {e}")
-            continue
-    
-    # Sort by match score
-    matched_jobs.sort(key=lambda x: x.get("match_score", 0), reverse=True)
-    
-    # Final output
-    print("\n" + "=" * 80)
-    print("✅ FINAL RESULTS")
-    print("=" * 80)
-    print(f"Analyzed {len(job_urls)} jobs")
-    print(f"Good matches (≥50%): {len([j for j in matched_jobs if j.get('match_score', 0) >= 0.5])}")
-    
-    return {
-        "candidate_profile": candidate_profile,
-        "matched_jobs": matched_jobs,
-        "jobs_analyzed": len(job_urls)
-    }
+# Removed unused example function process_job_matching - not used in production code

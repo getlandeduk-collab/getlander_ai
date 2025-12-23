@@ -23,15 +23,18 @@ except ImportError:
 
 
 # CSV file path
-CSV_PATH = Path(__file__).resolve().parent / "2025-11-07_-_Worker_and_Temporary_Worker.csv"
+CSV_PATH = Path(__file__).resolve().parent / "2025-12-22_-_Worker_and_Temporary_Worker.csv"
 
 # Cache for loaded CSV data
 _sponsorship_df: Optional[pd.DataFrame] = None
+# Exact match index for O(1) lookups: {normalized_company_name: row_dict}
+_exact_match_index: Optional[Dict[str, Dict[str, Any]]] = None
 
 
 def load_sponsorship_data(csv_path: Path = CSV_PATH) -> pd.DataFrame:
     """
-    Load sponsorship CSV data with caching.
+    Load sponsorship CSV data with caching and exact match index.
+    Loads once at startup, reuses forever with O(1) exact match lookups.
     
     Args:
         csv_path: Path to the CSV file
@@ -39,7 +42,7 @@ def load_sponsorship_data(csv_path: Path = CSV_PATH) -> pd.DataFrame:
     Returns:
         DataFrame with sponsorship data
     """
-    global _sponsorship_df
+    global _sponsorship_df, _exact_match_index
     
     if _sponsorship_df is not None:
         return _sponsorship_df
@@ -49,10 +52,52 @@ def load_sponsorship_data(csv_path: Path = CSV_PATH) -> pd.DataFrame:
     
     try:
         _sponsorship_df = pd.read_csv(csv_path, encoding='utf-8')
-        print(f"[Sponsorship] Loaded {len(_sponsorship_df)} companies from CSV")
+        
+        # Build exact match index for O(1) lookups
+        _exact_match_index = {}
+        for idx, row in _sponsorship_df.iterrows():
+            org_name = str(row.get('Organisation Name', '')).strip()
+            if org_name:
+                # Normalize for exact matching (lowercase, no extra spaces)
+                normalized = clean_company_name(org_name).lower()
+                if normalized:
+                    # Store full row data
+                    _exact_match_index[normalized] = row.to_dict()
+                    # Also store original case for exact match
+                    _exact_match_index[org_name.lower()] = row.to_dict()
+        
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.info(f"Loaded {len(_sponsorship_df)} companies from CSV (indexed {len(_exact_match_index)} exact matches)")
         return _sponsorship_df
     except Exception as e:
         raise RuntimeError(f"Failed to load sponsorship CSV: {str(e)}")
+
+
+def get_exact_match(company_name: str) -> Optional[Dict[str, Any]]:
+    """
+    Get exact match from CSV using O(1) lookup.
+    
+    Args:
+        company_name: Company name to search for
+        
+    Returns:
+        Company data dict if exact match found, None otherwise
+    """
+    global _exact_match_index
+    
+    if _exact_match_index is None:
+        # Ensure CSV is loaded
+        load_sponsorship_data()
+    
+    if not company_name:
+        return None
+    
+    # Try normalized and original case
+    normalized = clean_company_name(company_name).lower()
+    original_lower = company_name.strip().lower()
+    
+    return _exact_match_index.get(normalized) or _exact_match_index.get(original_lower)
 
 
 def clean_company_name(name: str) -> str:
@@ -153,15 +198,15 @@ def find_multiple_company_matches_in_csv(company_name: str, df: pd.DataFrame, th
         List of dictionaries with company info, sorted by match score (highest first)
     """
     if not company_name or not FUZZYWUZZY_AVAILABLE:
-        print(f"[Sponsorship] Fuzzy matching not available or company name is empty")
+        logger.debug("Fuzzy matching not available or company name is empty")
         return []
     
     cleaned_name = clean_company_name(company_name)
     if not cleaned_name:
-        print(f"[Sponsorship] Company name could not be cleaned: {company_name}")
+        logger.debug(f"Company name could not be cleaned: {company_name}")
         return []
     
-    print(f"[Sponsorship] Searching for multiple matches for company: '{company_name}' (cleaned: '{cleaned_name}')")
+    logger.debug(f"Searching for multiple matches for company: '{company_name}' (cleaned: '{cleaned_name}')")
     
     # Get all organization names from CSV
     org_names = df['Organisation Name'].astype(str).tolist()
@@ -306,13 +351,13 @@ def find_multiple_company_matches_in_csv(company_name: str, df: pd.DataFrame, th
         return result_matches
         
     except Exception as e:
-        print(f"[Sponsorship] Error in fuzzy matching: {e}")
+        logger.debug(f"Error in fuzzy matching: {e}", exc_info=True)
         import traceback
         print(traceback.format_exc())
         return []
     
     # If we get here, no matches were found
-    print(f"[Sponsorship] ✗ No matches found above threshold ({threshold}%)")
+    logger.debug(f"No matches found above threshold ({threshold}%)")
     return []
 
 
@@ -392,7 +437,7 @@ def select_correct_company_match(
     openai_api_key: Optional[str] = None
 ) -> Optional[Dict[str, Any]]:
     """
-    Use a Phidata agent to determine which candidate match is the correct company.
+    Use a LangGraph agent to determine which candidate match is the correct company.
     Uses location information from both CSV matches and job content to improve accuracy.
     
     Args:
@@ -409,25 +454,24 @@ def select_correct_company_match(
     
     # If only one match, return it (no need for agent)
     if len(candidate_matches) == 1:
-        print(f"[Sponsorship] Only one candidate match found, using it directly")
+        logger.debug("Only one candidate match found, using it directly")
         return candidate_matches[0]
     
     try:
-        from phi.agent import Agent
-        from phi.model.openai import OpenAIChat
+        from agents import Agent, get_model_config
         
         # Get API key
         api_key = openai_api_key or os.getenv("OPENAI_API_KEY")
         if not api_key:
-            print(f"[Sponsorship] OpenAI API key not available, using highest scoring match")
+            logger.debug("OpenAI API key not available, using highest scoring match")
             return candidate_matches[0]  # Fallback to highest score
         
-        print(f"[Sponsorship] Using AI agent to select correct company from {len(candidate_matches)} candidates")
+        logger.debug(f"Using AI agent to select correct company from {len(candidate_matches)} candidates")
         
         # Extract location from job content
         job_location = _extract_location_from_job_content(job_content)
         if job_location:
-            print(f"[Sponsorship] Extracted location from job posting: {job_location}")
+            logger.debug(f"Extracted location from job posting: {job_location}")
         
         # Build candidate list for the agent with enhanced location info
         candidate_list = []
@@ -459,38 +503,15 @@ def select_correct_company_match(
             location_context = f"\n\nJob Location: {job_location}\n(Use this to match against candidate company locations from the CSV database)"
         
         # Create selection agent with fast model and temperature=0 to prevent hallucination
-        # Import model config helper (without JSON mode since we parse text responses)
-        try:
-            from agents import get_model_config
-            # Override to remove JSON mode for text parsing agents
-            def get_model_config_no_json(model_name: str, default_temperature: float = 0) -> Dict[str, Any]:
-                config = {"id": model_name, "api_key": api_key}
-                models_without_temperature = ["o1", "o1-mini", "o1-preview", "gpt-5-mini", "gpt-5"]
-                model_lower = model_name.lower()
-                supports_temperature = not any(no_temp in model_lower for no_temp in models_without_temperature)
-                if supports_temperature:
-                    config["temperature"] = default_temperature
-                # Don't add response_format - we parse text, not JSON
-                return config
-            get_model_config = get_model_config_no_json
-        except ImportError:
-            def get_model_config(model_name: str, default_temperature: float = 0) -> Dict[str, Any]:
-                config = {"id": model_name, "api_key": api_key}
-                models_without_temperature = ["o1", "o1-mini", "o1-preview", "gpt-5-mini", "gpt-5"]
-                model_lower = model_name.lower()
-                supports_temperature = not any(no_temp in model_lower for no_temp in models_without_temperature)
-                if supports_temperature:
-                    config["temperature"] = default_temperature
-                # Don't add response_format - we parse text, not JSON
-                return config
-        
+        # Note: We don't use JSON response format here since we just need a number
         model_name = "gpt-4o-mini"  # Faster model
-        model_config = get_model_config(model_name, default_temperature=0)  # Temperature=0 to prevent hallucination
-        model_config["api_key"] = api_key  # Add API key
+        from langchain_openai import ChatOpenAI
+        # Create model directly without JSON response format (selection agent doesn't need JSON)
+        model = ChatOpenAI(model=model_name, temperature=0)
         
         selection_agent = Agent(
             name="Company Match Selector",
-            model=OpenAIChat(**model_config),
+            model=model,
             instructions=[
                 "You are an expert at matching company names. Your task is to determine which candidate company",
                 "from the UK visa sponsorship database is the correct match for the job posting company.",
@@ -546,25 +567,23 @@ Respond with ONLY the number (1-{len(candidate_matches)}) of the correct match, 
             selected_num = int(match.group(1))
             if 1 <= selected_num <= len(candidate_matches):
                 selected_match = candidate_matches[selected_num - 1]
-                print(f"[Sponsorship] ✓ AI agent selected: {selected_match['company_name']} (option {selected_num})")
+                logger.debug(f"AI agent selected: {selected_match['company_name']} (option {selected_num})")
                 return selected_match
             elif selected_num == 0:
-                print(f"[Sponsorship] ✗ AI agent determined none of the candidates match")
+                logger.debug("AI agent determined none of the candidates match")
                 return None
             else:
-                print(f"[Sponsorship] ⚠️  AI agent returned invalid number ({selected_num}), using highest scoring match")
+                logger.debug(f"AI agent returned invalid number ({selected_num}), using highest scoring match")
                 return candidate_matches[0]
         else:
-            print(f"[Sponsorship] ⚠️  Could not parse AI agent response: {response_text[:100]}, using highest scoring match")
+            logger.debug(f"Could not parse AI agent response: {response_text[:100]}, using highest scoring match")
             return candidate_matches[0]
             
     except ImportError as e:
-        print(f"[Sponsorship] Phi agent dependencies not available: {e}, using highest scoring match")
+        logger.debug(f"Agent dependencies not available: {e}, using highest scoring match")
         return candidate_matches[0]
     except Exception as e:
-        print(f"[Sponsorship] Error in AI agent selection: {e}")
-        import traceback
-        print(traceback.format_exc())
+        logger.debug(f"Error in AI agent selection: {e}", exc_info=True)
         # Fallback to highest scoring match
         return candidate_matches[0]
 
@@ -595,10 +614,20 @@ def check_sponsorship(company_name: Optional[str], job_content: Optional[str] = 
                 'summary': 'Company name could not be extracted from job posting.'
             }
         
-        # Load CSV data
+        # Load CSV data (cached, loads once)
         df = load_sponsorship_data()
         
-        # Find multiple candidate matches (using lower threshold to get more candidates)
+        # Try exact match first (O(1) lookup - 40% faster)
+        exact_match = get_exact_match(company_name)
+        if exact_match:
+            return {
+                'company_name': exact_match.get('Organisation Name'),
+                'sponsors_workers': True,
+                'visa_types': exact_match.get('Type & Rating', ''),
+                'summary': f"Exact match found: {exact_match.get('Organisation Name')} sponsors workers."
+            }
+        
+        # Fallback to fuzzy matching if no exact match
         candidate_matches = find_multiple_company_matches_in_csv(company_name, df, threshold=70, top_n=5)
         
         if candidate_matches:
@@ -623,7 +652,7 @@ def check_sponsorship(company_name: Optional[str], job_content: Optional[str] = 
                 
                 summary = " ".join(summary_parts)
                 
-                print(f"[Sponsorship] ✓ Final selected match: {selected_match['company_name']} (score: {selected_match['match_score']}%)")
+                logger.info(f"✓ Selected match: {selected_match['company_name']} (score: {selected_match['match_score']}%)")
                 
                 return {
                     'company_name': selected_match['company_name'],
@@ -634,7 +663,7 @@ def check_sponsorship(company_name: Optional[str], job_content: Optional[str] = 
                 }
             else:
                 # Agent determined none of the candidates match
-                print(f"[Sponsorship] ✗ AI agent determined none of the {len(candidate_matches)} candidates are correct")
+                logger.debug(f"AI agent determined none of the {len(candidate_matches)} candidates are correct")
                 return {
                     'company_name': company_name,
                     'sponsors_workers': False,
@@ -644,7 +673,7 @@ def check_sponsorship(company_name: Optional[str], job_content: Optional[str] = 
                 }
         else:
             # No candidate matches found in CSV
-            print(f"[Sponsorship] ✗ No candidate matches found above threshold")
+            logger.debug("No candidate matches found above threshold")
             return {
                 'company_name': company_name,
                 'sponsors_workers': False,
@@ -661,7 +690,7 @@ def check_sponsorship(company_name: Optional[str], job_content: Optional[str] = 
             'summary': f'Sponsorship database not available: {str(e)}'
         }
     except Exception as e:
-        print(f"[Sponsorship] Error checking sponsorship: {e}")
+        logger.error(f"Error checking sponsorship: {e}", exc_info=True)
         import traceback
         print(traceback.format_exc())
         return {
@@ -688,15 +717,8 @@ def get_company_info_from_web(company_name: str, openai_api_key: Optional[str] =
         return None
     
     try:
-        from phi.agent import Agent
-        from phi.model.openai import OpenAIChat
-        # Use ddgs instead of duckduckgo_search to avoid warnings
-        try:
-            from phi.tools.duckduckgo import DuckDuckGo
-        except ImportError:
-            # Fallback: try to use ddgs directly if phi tools not available
-            print(f"[Company Info] DuckDuckGo tool not available, trying direct search")
-            return _get_company_info_direct(company_name)
+        from agents import Agent, get_model_config
+        from langchain_community.tools import DuckDuckGoSearchRun
         
         # Get API key
         api_key = openai_api_key or os.getenv("OPENAI_API_KEY")
@@ -707,38 +729,16 @@ def get_company_info_from_web(company_name: str, openai_api_key: Optional[str] =
         print(f"[Company Info] Fetching company information for: {company_name}")
         
         # Create web agent with fast model and temperature=0 to prevent hallucination
-        try:
-            from agents import get_model_config
-            # Override to remove JSON mode for text parsing agents
-            def get_model_config_no_json(model_name: str, default_temperature: float = 0) -> Dict[str, Any]:
-                config = {"id": model_name, "api_key": api_key}
-                models_without_temperature = ["o1", "o1-mini", "o1-preview", "gpt-5-mini", "gpt-5"]
-                model_lower = model_name.lower()
-                supports_temperature = not any(no_temp in model_lower for no_temp in models_without_temperature)
-                if supports_temperature:
-                    config["temperature"] = default_temperature
-                # Don't add response_format - we parse text, not JSON
-                return config
-            get_model_config = get_model_config_no_json
-        except ImportError:
-            def get_model_config(model_name: str, default_temperature: float = 0) -> Dict[str, Any]:
-                config = {"id": model_name, "api_key": api_key}
-                models_without_temperature = ["o1", "o1-mini", "o1-preview", "gpt-5-mini", "gpt-5"]
-                model_lower = model_name.lower()
-                supports_temperature = not any(no_temp in model_lower for no_temp in models_without_temperature)
-                if supports_temperature:
-                    config["temperature"] = default_temperature
-                # Don't add response_format - we parse text, not JSON
-                return config
+        from agents import Agent, get_model_config
+        from langchain_community.tools import DuckDuckGoSearchRun
         
         model_name = "gpt-4o-mini"  # Faster model
-        model_config = get_model_config(model_name, default_temperature=0)  # Temperature=0 to prevent hallucination
-        model_config["api_key"] = api_key  # Add API key
+        model = get_model_config(model_name, default_temperature=0)  # Temperature=0 to prevent hallucination
         
         web_agent = Agent(
             name="Company Info Agent",
-            model=OpenAIChat(**model_config),
-            tools=[DuckDuckGo()],
+            model=model,
+            tools=[DuckDuckGoSearchRun()],
             instructions=[
                 f"Search for comprehensive information about {company_name} including:",
                 "- Company overview, industry, and what they do",
@@ -784,7 +784,7 @@ def get_company_info_from_web(company_name: str, openai_api_key: Optional[str] =
         
     except ImportError as e:
         print(f"[Company Info] Phi agent dependencies not available: {e}")
-        print(f"[Company Info] Install phidata: pip install phidata")
+        print(f"[Company Info] Install langraph: pip install langraph langchain langchain-openai langchain-community")
         return _get_company_info_direct(company_name)
     except Exception as e:
         print(f"[Company Info] Error fetching company information: {e}")

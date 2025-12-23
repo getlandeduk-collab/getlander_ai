@@ -3,7 +3,18 @@ Extract and format job data from API response for Firebase storage.
 Uses the exact same structure as test_firebase_simple.py
 """
 from datetime import datetime
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
+import os
+import json
+import logging
+
+# Setup logging with environment variable control
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
+logging.basicConfig(
+    level=getattr(logging, LOG_LEVEL, logging.INFO),
+    format='%(levelname)s: %(message)s'
+)
+logger = logging.getLogger(__name__)
 
 
 def detect_portal(url: str) -> str:
@@ -99,7 +110,7 @@ def extract_jobs_from_response(api_response: dict) -> List[dict]:
     jobs_data = []
     matched_jobs = api_response.get("matched_jobs", [])
     
-    print(f"[EXTRACT] Processing {len(matched_jobs)} matched jobs from API response")
+    logger.info(f"Extracting {len(matched_jobs)} jobs from API response")
     
     for idx, job in enumerate(matched_jobs, 1):
         try:
@@ -189,16 +200,157 @@ def extract_jobs_from_response(api_response: dict) -> List[dict]:
             
             jobs_data.append(job_data)
             
-            print(f"[EXTRACT] Job {idx}: {job_title} at {company} ({portal}) - Match: {match_score:.1%}")
+            logger.debug(f"Job {idx}: {job_title} at {company} ({portal}) - Match: {match_score:.1%}")
             
         except Exception as e:
-            print(f"[EXTRACT] [ERROR] Failed to extract job {idx}: {str(e)}")
-            import traceback
-            print(f"[EXTRACT] Traceback: {traceback.format_exc()}")
+            logger.error(f"Failed to extract job {idx}: {str(e)}", exc_info=True)
             continue
     
-    print(f"[EXTRACT] Successfully extracted {len(jobs_data)}/{len(matched_jobs)} jobs")
+    if len(jobs_data) != len(matched_jobs):
+        logger.warning(f"Only extracted {len(jobs_data)}/{len(matched_jobs)} jobs")
+    else:
+        logger.info(f"✓ Extracted {len(jobs_data)} jobs successfully")
     return jobs_data
+
+
+def extract_company_and_title_from_raw_data(
+    raw_scraped_data: str,
+    openai_api_key: Optional[str] = None,
+    model_name: str = "gpt-4o-mini"  # Fast model for quick extraction
+) -> Dict[str, Optional[str]]:
+    """
+    Extract company name and job title from raw unstructured scraped data.
+    
+    This function sends the raw scraped data directly to OpenAI API without any
+    preprocessing, parsing, or extraction. OpenAI is asked to read the text
+    naturally and identify the company name and job title.
+    
+    Args:
+        raw_scraped_data: Raw unstructured scraped text from job posting
+        openai_api_key: OpenAI API key (if not provided, uses OPENAI_API_KEY env var)
+        model_name: OpenAI model to use (default: "gpt-4o-mini")
+    
+    Returns:
+        Dictionary with structure:
+        {
+            "company_name": str or None,
+            "job_title": str or None
+        }
+    
+    Example:
+        >>> raw_data = "Skip to main content... Junior Data Analyst... MillerKnoll..."
+        >>> result = extract_company_and_title_from_raw_data(raw_data)
+        >>> print(result)
+        {'company_name': 'MillerKnoll', 'job_title': 'Junior Data Analyst'}
+    """
+    # Set OpenAI API key
+    if openai_api_key:
+        os.environ["OPENAI_API_KEY"] = openai_api_key
+    elif not os.getenv("OPENAI_API_KEY"):
+        raise ValueError("OPENAI_API_KEY must be provided or set as environment variable")
+    
+    try:
+        from langchain_openai import ChatOpenAI
+        from langchain_core.messages import HumanMessage
+        import re
+        
+        # Create OpenAI client with token limit for faster response
+        model = ChatOpenAI(model=model_name, temperature=0, max_tokens=500)  # Small limit since we only need JSON
+        
+        # Create prompt that asks OpenAI to read naturally and extract only company and title
+        prompt = f"""I'm going to give you raw scraped text from a job posting. This text is unstructured and may contain job titles, company names, locations, and other information all mixed together.
+
+Your task: Read through the entire text using your language understanding capabilities and tell me what the company name is and what the job title is.
+
+Important: Do NOT use parsing, regex, or extraction techniques. Simply read the text as a human would and identify which part represents the company name and which part represents the job title based on your understanding of how job postings are typically structured.
+
+Here's the raw scraped data:
+{raw_scraped_data}
+
+Please respond with ONLY a JSON object in this exact format:
+{{
+    "company_name": "the company name you identified, or null if not found",
+    "job_title": "the job title you identified, or null if not found"
+}}
+
+Return ONLY the JSON object, nothing else. No explanations, no markdown, just the JSON."""
+        
+        # Send to OpenAI
+        response = model.invoke([HumanMessage(content=prompt)])
+        
+        # Extract response content
+        response_text = ""
+        if hasattr(response, 'content'):
+            response_text = str(response.content)
+        elif hasattr(response, 'messages') and response.messages:
+            last_msg = response.messages[-1]
+            response_text = str(last_msg.content if hasattr(last_msg, 'content') else last_msg)
+        else:
+            response_text = str(response)
+        
+        # Clean response text (remove markdown code blocks if present)
+        response_text = response_text.strip()
+        if '```json' in response_text:
+            # Extract JSON from markdown code block
+            match = re.search(r'```json\s*\n?(.*?)\n?```', response_text, re.DOTALL)
+            if match:
+                response_text = match.group(1).strip()
+        elif '```' in response_text:
+            # Remove any code fence markers
+            response_text = re.sub(r'^```[a-zA-Z]*\s*', '', response_text, flags=re.MULTILINE)
+            response_text = re.sub(r'\s*```$', '', response_text, flags=re.MULTILINE)
+        
+        # Parse JSON response
+        try:
+            result = json.loads(response_text)
+            
+            # Validate and clean the result
+            company_name = result.get("company_name")
+            job_title = result.get("job_title")
+            
+            # Convert empty strings to None
+            if company_name == "" or company_name is None:
+                company_name = None
+            else:
+                company_name = str(company_name).strip()
+            
+            if job_title == "" or job_title is None:
+                job_title = None
+            else:
+                job_title = str(job_title).strip()
+            
+            return {
+                "company_name": company_name,
+                "job_title": job_title
+            }
+            
+        except json.JSONDecodeError as e:
+            # Try to extract JSON from text if direct parse fails
+            json_match = re.search(r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}', response_text, re.DOTALL)
+            if json_match:
+                try:
+                    result = json.loads(json_match.group(0))
+                    return {
+                        "company_name": result.get("company_name") or None,
+                        "job_title": result.get("job_title") or None
+                    }
+                except json.JSONDecodeError:
+                    pass
+            
+            # If all parsing fails, return None values
+            logger.warning(f"Failed to parse JSON from OpenAI response: {e}")
+            logger.debug(f"Response text: {response_text[:500]}")
+            return {
+                "company_name": None,
+                "job_title": None
+            }
+            
+    except Exception as e:
+        logger.error(f"Failed to extract company and title: {str(e)}", exc_info=True)
+        return {
+            "company_name": None,
+            "job_title": None
+        }
 
 
 # Example usage
@@ -264,5 +416,28 @@ if __name__ == "__main__":
     print(f"  from firebase_service import get_firebase_service")
     print(f"  firebase_service = get_firebase_service()")
     print(f"  doc_ids = firebase_service.save_job_applications_batch(user_id, jobs)")
+    print("="*70)
+    
+    # Example: Extract company and title from raw scraped data
+    print("\n" + "="*70)
+    print("EXAMPLE: Extracting company and title from raw scraped data")
+    print("="*70)
+    
+    sample_raw_data = """Skip to main content
+Junior Data Analyst in Chennai
+MillerKnoll
+London, England, United Kingdom
+Junior Data Analyst
+Apply
+Join to apply for the Junior Data Analyst role at MillerKnoll"""
+    
+    try:
+        result = extract_company_and_title_from_raw_data(sample_raw_data)
+        print(f"\n[RESULT] Extracted:")
+        print(f"  Company Name: {result['company_name']}")
+        print(f"  Job Title: {result['job_title']}")
+    except Exception as e:
+        print(f"[ERROR] {str(e)}")
+    
     print("="*70)
 

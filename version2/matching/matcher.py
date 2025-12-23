@@ -25,7 +25,7 @@ def match_job_resume(
     Calculate match percentage between a job and resume.
     
     This is the main entry point for the matching system. It:
-    1. Uses LLM (PhiData + GPT-4) to extract structured data
+    1. Uses LLM (LangGraph + GPT-4) to extract structured data
     2. Calculates match score using deterministic formulas
     3. Returns match percentage with detailed breakdown
     

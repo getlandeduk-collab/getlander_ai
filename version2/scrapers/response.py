@@ -6,35 +6,19 @@ from typing import Dict, Any, Optional, List
 import os
 import re
 import json
-from phi.agent import Agent
-from phi.model.openai import OpenAIChat
+import logging
+from agents import Agent, get_model_config
 
-# Import model config helper for consistent temperature handling
+# Setup logging with environment variable control
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
+logging.basicConfig(
+    level=getattr(logging, LOG_LEVEL, logging.INFO),
+    format='%(levelname)s: %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+# get_model_config is imported from agents module
 # Note: We don't use JSON mode here since we parse text responses with regex
-try:
-    from agents import get_model_config
-    # Override to remove JSON mode for text parsing agents
-    def get_model_config_no_json(model_name: str, default_temperature: float = 0) -> Dict[str, Any]:
-        config = {"id": model_name}
-        models_without_temperature = ["o1", "o1-mini", "o1-preview", "gpt-5-mini", "gpt-5"]
-        model_lower = model_name.lower()
-        supports_temperature = not any(no_temp in model_lower for no_temp in models_without_temperature)
-        if supports_temperature:
-            config["temperature"] = default_temperature
-        # Don't add response_format - we parse text, not JSON
-        return config
-    get_model_config = get_model_config_no_json
-except ImportError:
-    # Fallback if agents module not available
-    def get_model_config(model_name: str, default_temperature: float = 0) -> Dict[str, Any]:
-        config = {"id": model_name}
-        models_without_temperature = ["o1", "o1-mini", "o1-preview", "gpt-5-mini", "gpt-5"]
-        model_lower = model_name.lower()
-        supports_temperature = not any(no_temp in model_lower for no_temp in models_without_temperature)
-        if supports_temperature:
-            config["temperature"] = default_temperature
-        # Don't add response_format - we parse text, not JSON
-        return config
 
 
 def summarize_scraped_data(
@@ -70,29 +54,23 @@ def summarize_scraped_data(
     
     # Create agent with fast model and temperature=0 to prevent hallucination
     # Using gpt-4o-mini for speed, with temperature=0 for consistency
+    # Note: We don't use JSON response format here since we parse text responses with regex
     model_name = "gpt-4o-mini"  # Fast model
-    model_config = get_model_config(model_name, default_temperature=0)  # Temperature=0 to prevent hallucination
+    from langchain_openai import ChatOpenAI
+    # Create model directly without JSON response format (summarizer doesn't need JSON)
+    model = ChatOpenAI(model=model_name, temperature=0)
     
     agent = Agent(
         show_tool_calls=True,
         markdown=True,
-        model=OpenAIChat(**model_config)
+        model=model
     )
     
     # Prepare the content to analyze
     content_to_analyze = ""
     if isinstance(scraped_data, dict):
-        # Log what we received for debugging
-        print("\n" + "="*80)
-        print("📋 SUMMARIZER - Received Data Structure")
-        print("="*80)
-        print(f"Job Title: {scraped_data.get('job_title', 'Not provided')}")
-        print(f"Company Name (pre-extracted): {scraped_data.get('company_name', 'Not provided')}")
-        print(f"Location: {scraped_data.get('location', 'Not provided')}")
-        print(f"Description length: {len(str(scraped_data.get('description', '')))} chars")
-        print(f"Text content length: {len(str(scraped_data.get('text_content', '')))} chars")
-        print(f"Description preview (first 200 chars): {str(scraped_data.get('description', ''))[:200]}...")
-        print("="*80 + "\n")
+        # Reduced logging for performance - only log key info
+        logger.debug(f"Processing - Title: {scraped_data.get('job_title', 'N/A')[:50]}, Company: {scraped_data.get('company_name', 'N/A')[:50]}, Content: {len(str(scraped_data.get('text_content', '')))} chars")
         
         # Combine all relevant fields - prioritize raw scraped data
         content_parts = []
@@ -112,12 +90,12 @@ def summarize_scraped_data(
         if scraped_data.get("suggested_skills"):
             content_parts.append(f"=== SUGGESTED SKILLS ===\n{scraped_data['suggested_skills']}\n")
         
-        # WARNING: Pre-extracted fields may contain errors - use with caution
+        # Pre-extracted fields (from OpenAI extraction - these are accurate, use as-is)
         if scraped_data.get("job_title"):
-            content_parts.append(f"=== PRE-EXTRACTED JOB TITLE (MAY CONTAIN ERRORS - VERIFY FROM RAW TEXT) ===\n{scraped_data['job_title']}\n")
+            content_parts.append(f"=== JOB TITLE (ALREADY EXTRACTED BY OpenAI) ===\n{scraped_data['job_title']}\n")
         
         if scraped_data.get("company_name"):
-            content_parts.append(f"=== PRE-EXTRACTED COMPANY NAME (MAY CONTAIN ERRORS - VERIFY FROM RAW TEXT) ===\n{scraped_data['company_name']}\n")
+            content_parts.append(f"=== COMPANY NAME (ALREADY EXTRACTED BY OpenAI) ===\n{scraped_data['company_name']}\n")
         
         if scraped_data.get("location"):
             content_parts.append(f"=== PRE-EXTRACTED LOCATION ===\n{scraped_data['location']}\n")
@@ -125,10 +103,55 @@ def summarize_scraped_data(
         content_to_analyze = "\n".join(content_parts) if content_parts else str(scraped_data)
     else:
         content_to_analyze = str(scraped_data)
-        print(f"[SUMMARIZER] Received non-dict data: {type(scraped_data)}")
+        logger.warning(f"Received non-dict data: {type(scraped_data)}")
     
-    # Create extraction prompt with emphasis on using raw scraped data
-    extraction_prompt = f"""You are extracting structured information from RAW SCRAPED JOB POSTING DATA. 
+    # Check if company name and job title are already provided (from OpenAI extraction)
+    has_company = scraped_data.get("company_name") and scraped_data.get("company_name") not in [None, "", "Not specified", "Company name not available in posting"]
+    has_title = scraped_data.get("job_title") and scraped_data.get("job_title") not in [None, "", "Not specified", "Job title not available in posting"]
+    
+    # Create optimized extraction prompt - skip extraction if already provided
+    if has_company and has_title:
+        # Both already extracted - focus only on other fields
+        extraction_prompt = f"""You are extracting structured information from RAW SCRAPED JOB POSTING DATA. 
+The job title and company name have already been extracted and are accurate. Use them as provided.
+
+JOB TITLE (ALREADY EXTRACTED): {scraped_data.get("job_title")}
+COMPANY NAME (ALREADY EXTRACTED): {scraped_data.get("company_name")}
+
+RAW SCRAPED DATA PROVIDED:
+{content_to_analyze}
+
+EXTRACTION RULES:
+
+1. **Job Title**: Use the provided title: {scraped_data.get("job_title")}
+2. **Company Name**: Use the provided company: {scraped_data.get("company_name")}
+
+3. **Complete Job Description**: Extract the full job description from the content
+4. **Required Skills**: List each skill separately (e.g., Python, JavaScript, React)
+5. **Required Experience**: Extract years and type (e.g., "3-5 years", "Senior level")
+6. **Qualifications and Education**: Extract education requirements
+7. **Responsibilities**: Extract key responsibilities and duties
+8. **Salary/Compensation**: Extract if mentioned (e.g., "$100k-$150k", "£50,000-£70,000")
+9. **Location**: Extract job location (city, state, country, or remote)
+10. **Job Type**: Extract employment type (full-time, part-time, contract, internship, etc.)
+11. **Visa Sponsorship/Scholarship**: Look for keywords like: visa sponsorship, visa support, H1B, work permit, 
+    scholarship, funding, financial support, tuition assistance. Extract exact details if mentioned.
+
+OUTPUT FORMAT:
+Return structured data with all fields clearly labeled. Use clear field names like:
+- Job Title: {scraped_data.get("job_title")}
+- Company Name: {scraped_data.get("company_name")}
+- Description: [full description]
+- Required Skills: [list of skills]
+- etc.
+
+IMPORTANT: 
+- Use the provided job title and company name - do NOT re-extract them
+- If a field is not found, mark it as 'Not specified'
+- For visa/scholarship: If mentioned, extract exact details. If not mentioned, set to 'Not specified'"""
+    else:
+        # Need to extract company/title - use full extraction prompt
+        extraction_prompt = f"""You are extracting structured information from RAW SCRAPED JOB POSTING DATA. 
 The raw data may contain extraction errors in job title and company name fields, so you must carefully analyze 
 the FULL TEXT CONTENT to find the correct information.
 
@@ -138,27 +161,15 @@ RAW SCRAPED DATA PROVIDED:
 CRITICAL EXTRACTION RULES:
 
 1. **Job Title** (REQUIRED - MUST be extracted accurately):
-   - IGNORE any pre-extracted job title if it seems incorrect or truncated
    - Look in the FULL TEXT CONTENT for the actual job title
    - Common locations: Page title, H1/H2 headings, first few lines of content, metadata
-   - Look for patterns like: "Job Title:", "Position:", "Role:", or standalone prominent text
    - Extract the COMPLETE job title (e.g., "Senior Software Engineer", not just "Engineer")
-   - Examples: "Full Stack Developer", "Software Engineer", "Data Scientist", "Product Manager"
-   - REJECT: Generic words like "Job", "Position", "Role", "Opportunity", "Career"
-   - REJECT: Truncated titles ending with "..." or incomplete words
    - If truly not found after thorough analysis, return "Not specified"
 
 2. **Company Name** (REQUIRED - MUST be extracted accurately):
-   - IGNORE any pre-extracted company name if it seems incorrect (e.g., "hirer", "employer", generic words)
    - Look in the FULL TEXT CONTENT for the actual company name
    - Common locations: "by [Company]", "Company:", "at [Company]", "from [Company]", "Employer:", "Organization:"
-   - Check page headers, footers, and metadata sections
    - Look for company names with legal suffixes: Ltd, Limited, Inc, LLC, Corp, Corporation, Group, Holdings
-   - Examples: "EPAM Systems", "Microsoft Corporation", "Google LLC", "Amazon Web Services"
-   - REJECT: Generic words like "hirer", "employer", "recruiter", "hiring", "company", "organization"
-   - REJECT: Sentence fragments like "transforming legacy data", "leveraging technology"
-   - REJECT: Truncated names ending with "..." or incomplete words
-   - REJECT: Names that are clearly part of a sentence (e.g., "by leveraging", "at transforming")
    - If truly not found after thorough analysis, return "Not specified"
 
 3. **Complete Job Description**: Extract the full job description from the content
@@ -172,13 +183,6 @@ CRITICAL EXTRACTION RULES:
 11. **Visa Sponsorship/Scholarship**: Look for keywords like: visa sponsorship, visa support, H1B, work permit, 
     scholarship, funding, financial support, tuition assistance. Extract exact details if mentioned.
 
-EXTRACTION METHODOLOGY:
-- Read the ENTIRE raw scraped content carefully
-- Cross-reference multiple sections to find the correct job title and company name
-- Prioritize information from structured sections (headings, metadata) over free text
-- Validate extracted company names: they should be proper nouns, not generic words or sentence fragments
-- Validate extracted job titles: they should be specific positions, not generic terms
-
 OUTPUT FORMAT:
 Return structured data with all fields clearly labeled. Use clear field names like:
 - Job Title: [extracted title]
@@ -188,8 +192,6 @@ Return structured data with all fields clearly labeled. Use clear field names li
 - etc.
 
 IMPORTANT: 
-- Job title and Company name are CRITICAL - spend extra time verifying these from the raw content
-- If a pre-extracted value seems wrong, IGNORE it and extract from the raw content instead
 - If a field is not found, mark it as 'Not specified'
 - For visa/scholarship: If mentioned, extract exact details. If not mentioned, set to 'Not specified'"""
     
@@ -323,12 +325,17 @@ def _parse_agent_response(response_text: str, scraped_data: Dict[str, Any]) -> D
             if skill.strip() and skill.strip() != "Not specified"
         ]
     
-    # Fallback to scraped_data if fields are missing
-    if not result["job_title"] and scraped_data.get("job_title"):
+    # Prioritize pre-extracted values from OpenAI (they are more accurate)
+    # Only use parsed values if pre-extracted are missing
+    if scraped_data.get("job_title") and scraped_data.get("job_title") not in [None, "", "Not specified", "Job title not available in posting"]:
         result["job_title"] = scraped_data["job_title"]
+    elif not result["job_title"]:
+        result["job_title"] = scraped_data.get("job_title") or None
     
-    if not result["company_name"] and scraped_data.get("company_name"):
+    if scraped_data.get("company_name") and scraped_data.get("company_name") not in [None, "", "Not specified", "Company name not available in posting"]:
         result["company_name"] = scraped_data["company_name"]
+    elif not result["company_name"]:
+        result["company_name"] = scraped_data.get("company_name") or None
     
     if not result["location"] and scraped_data.get("location"):
         result["location"] = scraped_data["location"]
