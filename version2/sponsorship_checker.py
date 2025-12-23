@@ -5,9 +5,18 @@ from __future__ import annotations
 
 import os
 import re
+import logging
 from pathlib import Path
 from typing import Dict, Any, Optional, List
 import pandas as pd
+
+# Setup logging with environment variable control
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
+logging.basicConfig(
+    level=getattr(logging, LOG_LEVEL, logging.INFO),
+    format='%(levelname)s: %(message)s'
+)
+logger = logging.getLogger(__name__)
 
 try:
     from fuzzywuzzy import fuzz
@@ -66,8 +75,6 @@ def load_sponsorship_data(csv_path: Path = CSV_PATH) -> pd.DataFrame:
                     # Also store original case for exact match
                     _exact_match_index[org_name.lower()] = row.to_dict()
         
-        import logging
-        logger = logging.getLogger(__name__)
         logger.info(f"Loaded {len(_sponsorship_df)} companies from CSV (indexed {len(_exact_match_index)} exact matches)")
         return _sponsorship_df
     except Exception as e:
