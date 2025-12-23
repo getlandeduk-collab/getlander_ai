@@ -10,7 +10,7 @@ lxml==5.3.0
 firecrawl-py
 
 # Data Processing & Validation
-pydantic==2.9.2
+pydantic>=2.10.3,<3.0.0
 pandas>=2.0.0
 numpy==2.1.1
 
