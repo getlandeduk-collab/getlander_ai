@@ -96,12 +96,12 @@ def summarize_scraped_data(
         if scraped_data.get("suggested_skills"):
             content_parts.append(f"=== SUGGESTED SKILLS ===\n{scraped_data['suggested_skills']}\n")
         
-        # Pre-extracted fields (from OpenAI extraction - these are accurate, use as-is)
+        # Pre-extracted fields (from Gemini extraction - these are accurate, use as-is)
         if scraped_data.get("job_title"):
-            content_parts.append(f"=== JOB TITLE (ALREADY EXTRACTED BY OpenAI) ===\n{scraped_data['job_title']}\n")
+            content_parts.append(f"=== JOB TITLE (ALREADY EXTRACTED BY Gemini) ===\n{scraped_data['job_title']}\n")
         
         if scraped_data.get("company_name"):
-            content_parts.append(f"=== COMPANY NAME (ALREADY EXTRACTED BY OpenAI) ===\n{scraped_data['company_name']}\n")
+            content_parts.append(f"=== COMPANY NAME (ALREADY EXTRACTED BY Gemini) ===\n{scraped_data['company_name']}\n")
         
         if scraped_data.get("location"):
             content_parts.append(f"=== PRE-EXTRACTED LOCATION ===\n{scraped_data['location']}\n")
@@ -111,7 +111,7 @@ def summarize_scraped_data(
         content_to_analyze = str(scraped_data)
         logger.warning(f"Received non-dict data: {type(scraped_data)}")
     
-    # Check if company name and job title are already provided (from OpenAI extraction)
+    # Check if company name and job title are already provided (from Gemini extraction)
     has_company = scraped_data.get("company_name") and scraped_data.get("company_name") not in [None, "", "Not specified", "Company name not available in posting"]
     has_title = scraped_data.get("job_title") and scraped_data.get("job_title") not in [None, "", "Not specified", "Job title not available in posting"]
     
@@ -331,7 +331,7 @@ def _parse_agent_response(response_text: str, scraped_data: Dict[str, Any]) -> D
             if skill.strip() and skill.strip() != "Not specified"
         ]
     
-    # Prioritize pre-extracted values from OpenAI (they are more accurate)
+    # Prioritize pre-extracted values from Gemini (they are more accurate)
     # Only use parsed values if pre-extracted are missing
     if scraped_data.get("job_title") and scraped_data.get("job_title") not in [None, "", "Not specified", "Job title not available in posting"]:
         result["job_title"] = scraped_data["job_title"]

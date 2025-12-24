@@ -216,10 +216,10 @@ def extract_jobs_from_response(api_response: dict) -> List[dict]:
 def extract_company_and_title_from_raw_data(
     raw_scraped_data: str,
     openai_api_key: Optional[str] = None,
-    model_name: str = "gpt-4o-mini"  # Fast model for quick extraction
+    model_name: str = "gpt-4o-mini"  # Fast and intelligent OpenAI model
 ) -> Dict[str, Optional[str]]:
     """
-    Extract company name and job title from raw unstructured scraped data.
+    Extract company name and job title from raw unstructured scraped data using OpenAI.
     
     This function sends the raw scraped data directly to OpenAI API without any
     preprocessing, parsing, or extraction. OpenAI is asked to read the text
@@ -228,7 +228,7 @@ def extract_company_and_title_from_raw_data(
     Args:
         raw_scraped_data: Raw unstructured scraped text from job posting
         openai_api_key: OpenAI API key (if not provided, uses OPENAI_API_KEY env var)
-        model_name: OpenAI model to use (default: "gpt-4o-mini")
+        model_name: OpenAI model to use (default: "gpt-4o-mini" - fast and intelligent)
     
     Returns:
         Dictionary with structure:
@@ -254,8 +254,8 @@ def extract_company_and_title_from_raw_data(
         from langchain_core.messages import HumanMessage
         import re
         
-        # Create OpenAI client with token limit for faster response
-        model = ChatOpenAI(model=model_name, temperature=0, max_tokens=500)  # Small limit since we only need JSON
+        # Create OpenAI client with fast model and token limit for faster response
+        model = ChatOpenAI(model=model_name, temperature=0, max_tokens=500)
         
         # Create prompt that asks OpenAI to read naturally and extract only company and title
         prompt = f"""I'm going to give you raw scraped text from a job posting. This text is unstructured and may contain job titles, company names, locations, and other information all mixed together.
@@ -278,8 +278,7 @@ Return ONLY the JSON object, nothing else. No explanations, no markdown, just th
         # Send to OpenAI
         response = model.invoke([HumanMessage(content=prompt)])
         
-        # Extract response content
-        response_text = ""
+        # Extract response text
         if hasattr(response, 'content'):
             response_text = str(response.content)
         elif hasattr(response, 'messages') and response.messages:
@@ -288,8 +287,9 @@ Return ONLY the JSON object, nothing else. No explanations, no markdown, just th
         else:
             response_text = str(response)
         
-        # Clean response text (remove markdown code blocks if present)
         response_text = response_text.strip()
+        
+        # Clean response text (remove markdown code blocks if present)
         if '```json' in response_text:
             # Extract JSON from markdown code block
             match = re.search(r'```json\s*\n?(.*?)\n?```', response_text, re.DOTALL)
@@ -338,7 +338,7 @@ Return ONLY the JSON object, nothing else. No explanations, no markdown, just th
                     pass
             
             # If all parsing fails, return None values
-            logger.warning(f"Failed to parse JSON from OpenAI response: {e}")
+            logger.warning(f"Failed to parse JSON from Gemini response: {e}")
             logger.debug(f"Response text: {response_text[:500]}")
             return {
                 "company_name": None,

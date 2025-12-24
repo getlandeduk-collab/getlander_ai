@@ -39,6 +39,10 @@ typing-extensions>=4.8.0
 # OpenAI
 openai>=2.0.0,<3.0.0  # Updated to v2 for httpx compatibility
 
+# Google Gemini (try new package first, fallback to deprecated one)
+google-genai>=0.2.0
+google-generativeai>=0.8.0  # Fallback for compatibility
+
 # Utilities
 python-dotenv==1.0.1
 pyngrok==7.2.3

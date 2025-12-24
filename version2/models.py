@@ -113,8 +113,7 @@ class SponsorshipInfo(BaseModel):
     sponsors_workers: bool = False
     visa_types: Optional[str] = None
     summary: str = "No sponsorship information available"
-    document_id: Optional[str] = None
-    document_data: Optional[Dict[str, Any]] = None  # Full Firestore document content
+    # Note: document_id and document_data are internal Firebase fields and should NOT be included in API responses
 
 
 class MatchJobsResponse(BaseModel):

@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Dict, Any, Optional, List
 import pandas as pd
 
-# Setup logging with environment variable control
+# Setup logging
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 logging.basicConfig(
     level=getattr(logging, LOG_LEVEL, logging.INFO),

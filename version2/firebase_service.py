@@ -358,7 +358,7 @@ class FirebaseService:
             company = job_data.get("company", "").strip()
             role = job_data.get("role", "").strip()
             
-            # Strategy 1: Check by job URL (most reliable)
+            # Strategy 1: Check by job URL (most reliable) - using .where() syntax
             if job_link:
                 query = collection_ref.where("link", "==", job_link).limit(1)
                 docs = query.stream()
@@ -366,7 +366,7 @@ class FirebaseService:
                     logger.debug(f"Duplicate found by URL: {doc.id}")
                     return doc.id
             
-            # Strategy 2: Check by company + role (fallback if no URL)
+            # Strategy 2: Check by company + role (fallback if no URL) - using .where() syntax
             if company and role:
                 query = collection_ref.where("company", "==", company).where("role", "==", role).limit(1)
                 docs = query.stream()
@@ -509,10 +509,10 @@ class FirebaseService:
                 try:
                     # Save directly - duplicate check happens inside save_job_application
                     # (removed duplicate check here to avoid checking twice - 10% faster)
-                    doc_id = self.save_job_application(user_id, job_data)
-                    document_ids.append(doc_id)
+                        doc_id = self.save_job_application(user_id, job_data)
+                        document_ids.append(doc_id)
                     # Note: save_job_application handles duplicates internally
-                    new_count += 1
+                        new_count += 1
                 except Exception as job_error:
                     logger.error(f"Failed to save job {idx}: {str(job_error)}", exc_info=True)
                     # Continue with other jobs even if one fails
@@ -596,7 +596,7 @@ class FirebaseService:
                     logger.debug(f"Duplicate sponsorship found by request_id: {doc.id}")
                     return doc.id
             
-            # Strategy 2: Check by exact company name match (case-sensitive)
+            # Strategy 2: Check by exact company name match (case-sensitive) - using new filter() syntax
             if company_name and company_name.strip():
                 company_name_clean = company_name.strip()
                 query = collection_ref.where("companyName", "==", company_name_clean).limit(1)
