@@ -23,9 +23,11 @@ logger = logging.getLogger(__name__)
 try:
     import firebase_admin
     from firebase_admin import credentials, firestore
+    from google.cloud.firestore_v1 import FieldFilter
     FIREBASE_AVAILABLE = True
 except ImportError:
     FIREBASE_AVAILABLE = False
+    FieldFilter = None
 
 # Load environment variables
 load_dotenv()
@@ -358,17 +360,23 @@ class FirebaseService:
             company = job_data.get("company", "").strip()
             role = job_data.get("role", "").strip()
             
-            # Strategy 1: Check by job URL (most reliable) - using .where() syntax
+            # Strategy 1: Check by job URL (most reliable) - using filter keyword argument
             if job_link:
-                query = collection_ref.where("link", "==", job_link).limit(1)
+                if FieldFilter:
+                    query = collection_ref.where(filter=FieldFilter("link", "==", job_link)).limit(1)
+                else:
+                    query = collection_ref.where("link", "==", job_link).limit(1)
                 docs = query.stream()
                 for doc in docs:
                     logger.debug(f"Duplicate found by URL: {doc.id}")
                     return doc.id
             
-            # Strategy 2: Check by company + role (fallback if no URL) - using .where() syntax
+            # Strategy 2: Check by company + role (fallback if no URL) - using filter keyword argument
             if company and role:
-                query = collection_ref.where("company", "==", company).where("role", "==", role).limit(1)
+                if FieldFilter:
+                    query = collection_ref.where(filter=FieldFilter("company", "==", company)).where(filter=FieldFilter("role", "==", role)).limit(1)
+                else:
+                    query = collection_ref.where("company", "==", company).where("role", "==", role).limit(1)
                 docs = query.stream()
                 for doc in docs:
                     logger.debug(f"Duplicate found by company+role: {doc.id}")
@@ -590,16 +598,22 @@ class FirebaseService:
             
             # Strategy 1: Check by request_id (most specific - same match-jobs request)
             if request_id:
-                query = collection_ref.where("requestId", "==", request_id).limit(1)
+                if FieldFilter:
+                    query = collection_ref.where(filter=FieldFilter("requestId", "==", request_id)).limit(1)
+                else:
+                    query = collection_ref.where("requestId", "==", request_id).limit(1)
                 docs = query.stream()
                 for doc in docs:
                     logger.debug(f"Duplicate sponsorship found by request_id: {doc.id}")
                     return doc.id
             
-            # Strategy 2: Check by exact company name match (case-sensitive) - using new filter() syntax
+            # Strategy 2: Check by exact company name match (case-sensitive) - using filter keyword argument
             if company_name and company_name.strip():
                 company_name_clean = company_name.strip()
-                query = collection_ref.where("companyName", "==", company_name_clean).limit(1)
+                if FieldFilter:
+                    query = collection_ref.where(filter=FieldFilter("companyName", "==", company_name_clean)).limit(1)
+                else:
+                    query = collection_ref.where("companyName", "==", company_name_clean).limit(1)
                 docs = query.stream()
                 for doc in docs:
                     logger.debug(f"Duplicate sponsorship found by exact company name: {doc.id}")

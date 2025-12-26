@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Request, Depends, BackgroundTasks
 
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -359,6 +359,44 @@ async def rate_limit(request: Request, settings: Settings = Depends(get_settings
 
 
 
+async def stream_openai_response(prompt: str, model_name: str = "gpt-4o-mini", openai_api_key: Optional[str] = None):
+    """
+    Stream OpenAI API response as Server-Sent Events (SSE).
+    
+    Args:
+        prompt: The prompt to send to OpenAI
+        model_name: The model to use (default: gpt-4o-mini)
+        openai_api_key: OpenAI API key (if not provided, uses OPENAI_API_KEY env var)
+    
+    Yields:
+        SSE-formatted chunks of the response
+    """
+    try:
+        from openai import OpenAI
+        
+        client = OpenAI(api_key=openai_api_key or os.getenv("OPENAI_API_KEY"))
+        
+        # Note: Some models don't support temperature=0, so we omit it to use default
+        stream = client.chat.completions.create(
+            model=model_name,
+            messages=[{"role": "user", "content": prompt}],
+            stream=True
+        )
+        
+        for chunk in stream:
+            if chunk.choices[0].delta.content is not None:
+                content = chunk.choices[0].delta.content
+                # Format as SSE
+                yield f"data: {json.dumps({'content': content, 'type': 'token'})}\n\n"
+        
+        # Send completion signal
+        yield f"data: {json.dumps({'type': 'done'})}\n\n"
+        
+    except Exception as e:
+        # Send error as SSE
+        yield f"data: {json.dumps({'type': 'error', 'error': str(e)})}\n\n"
+
+
 def clean_job_title(title: Optional[str]) -> Optional[str]:
     """
     Clean and normalize job title, removing patterns like "job_title:**Name:M/L developer".
@@ -384,7 +422,15 @@ def clean_job_title(title: Optional[str]) -> Optional[str]:
     title = re.sub(r'^[^:]*:\s*', '', title)  # Remove "Job Board: " or "Category: "
     title = re.sub(r'\s*[-–—|]\s*at\s+[^-]+$', '', title, flags=re.I)  # Remove " - at Company Name"
     title = re.sub(r'\s*[-–—|]\s*[^-]+(?:\.com|\.in|\.org).*$', '', title, flags=re.I)  # Remove website suffixes
-    title = re.sub(r'\s*[-–—|]\s*.+$', '', title)  # Remove " - Company Name" (generic)
+    # Only remove " - Company Name" if it looks like a company name (not part of job title like "Front-End")
+    # Be very conservative - only remove if it's clearly a company suffix pattern
+    # Pattern: " - CompanyName" or " - Company Name Ltd" at the end, but NOT if it contains job keywords
+    job_keywords = ['developer', 'engineer', 'manager', 'analyst', 'specialist', 'architect', 'designer', 'scientist', 'consultant', 'coordinator', 'officer', 'executive', 'director', 'lead', 'senior', 'junior', 'front', 'back', 'end', 'full', 'stack', 'react', 'angular', 'vue', 'node', 'python', 'java', 'c++']
+    # Check if title contains job keywords - if so, don't remove anything after dash (it's part of title)
+    if not any(keyword in title.lower() for keyword in job_keywords):
+        # Only remove company suffixes if no job keywords found
+        # Match patterns like " - Robert Half" or " - Company Ltd" at the end
+        title = re.sub(r'\s*[-–—|]\s*(?:[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*(?:\s+(?:Ltd|Limited|Inc|Corp|LLC|LLP|PLC))?)$', '', title)
     title = re.sub(r'\s*[|]\s*', ' ', title)  # Replace pipe separators with space
     
     # Remove quotes and special characters at start/end
@@ -2325,18 +2371,26 @@ async def match_jobs(
 
             
 
-            # Use OpenAI-extracted values as primary source (already extracted above)
-            # Only use summarized data as fallback if OpenAI extraction failed
-            final_job_title = final_extracted_title or summarized_data.get("job_title") or raw_job_title or "Job title not available in posting"
-            final_company = final_extracted_company or summarized_data.get("company_name") or "Company name not available in posting"
-            
-            # Clean the final values
-            if final_job_title and final_job_title != "Job title not available in posting":
-                cleaned_title = clean_job_title(final_job_title)
-                if cleaned_title and len(cleaned_title) >= 5:
-                    final_job_title = cleaned_title
+            # Prioritize raw_job_title if it's provided and looks valid (frontend already has correct title)
+            # Only use OpenAI-extracted title if raw_job_title is missing or invalid
+            if raw_job_title and len(raw_job_title.strip()) >= 5:
+                # Use raw_job_title as primary source, but clean it gently (don't truncate)
+                cleaned_raw = clean_job_title(raw_job_title)
+                if cleaned_raw and len(cleaned_raw) >= 5:
+                    final_job_title = cleaned_raw
                 else:
-                    final_job_title = raw_job_title or "Job title not available in posting"
+                    # If cleaning broke it, use raw as-is (it's from frontend, likely correct)
+                    final_job_title = raw_job_title.strip()
+            else:
+                # Fallback to OpenAI-extracted title if raw_job_title is not available
+                final_job_title = final_extracted_title or summarized_data.get("job_title") or "Job title not available in posting"
+                # Clean the extracted title
+                if final_job_title and final_job_title != "Job title not available in posting":
+                    cleaned_title = clean_job_title(final_job_title)
+                    if cleaned_title and len(cleaned_title) >= 5:
+                        final_job_title = cleaned_title
+            
+            final_company = final_extracted_company or summarized_data.get("company_name") or "Company name not available in posting"
             
             if final_company and final_company != "Company name not available in posting":
                 cleaned_company = clean_company_name(final_company)
@@ -3027,7 +3081,37 @@ Be strict with scoring:
 
 """
 
-                response = scorer_agent.run(prompt)
+                # Use OpenAI streaming API directly for better control
+                openai_key = settings.openai_api_key or os.getenv("OPENAI_API_KEY")
+                if openai_key:
+                    try:
+                        from openai import OpenAI
+                        client = OpenAI(api_key=openai_key)
+                        
+                        # Use streaming to get response faster (but collect full response)
+                        # Note: Some models don't support temperature=0, so we omit it to use default
+                        stream = client.chat.completions.create(
+                            model=settings.model_name or "gpt-4o-mini",
+                            messages=[{"role": "user", "content": prompt}],
+                            stream=True
+                        )
+                        
+                        # Collect streaming response
+                        response_text = ""
+                        for chunk in stream:
+                            if chunk.choices[0].delta.content is not None:
+                                response_text += chunk.choices[0].delta.content
+                        
+                        # Create a mock response object for compatibility
+                        class MockResponse:
+                            def __init__(self, content):
+                                self.content = content
+                        response = MockResponse(response_text)
+                    except Exception as e:
+                        logger.warning(f"OpenAI streaming failed, falling back to agent: {e}")
+                        response = scorer_agent.run(prompt)
+                else:
+                    response = scorer_agent.run(prompt)
 
                 
 
@@ -3141,6 +3225,22 @@ Be strict with scoring:
                 # Removed delay for faster processing
                 return result
         
+        # Helper function to check if visa details are already in job content
+        def has_visa_details_in_content(content: str) -> bool:
+            """Check if visa/sponsorship details are already mentioned in the job content."""
+            if not content:
+                return False
+            
+            content_lower = content.lower()
+            visa_keywords = [
+                "visa sponsorship", "visa support", "sponsor visa", "visa sponsor",
+                "work permit", "visa assistance", "sponsorship available",
+                "uk visa sponsor", "registered sponsor", "tier 2", "tier 5",
+                "skilled worker visa", "sponsor license", "sponsor licence"
+            ]
+            
+            return any(keyword in content_lower for keyword in visa_keywords)
+        
         # Define async function for sponsorship checking (can run in parallel with scoring)
         async def check_sponsorship_for_companies_async() -> Optional[Dict[str, Any]]:
             """Check sponsorship for all company names in parallel."""
@@ -3160,6 +3260,19 @@ Be strict with scoring:
                             if job_url:
                                 cached_data = SCRAPE_CACHE.get(job_url, {})
                                 job_content = cached_data.get('description') or cached_data.get('scraped_summary') or cached_data.get('text_content') or ""
+                            
+                            # Check if visa details are already in the job content
+                            # If they are, skip the sponsorship check
+                            if has_visa_details_in_content(job_content):
+                                logger.debug(f"Skipping sponsorship check for {company_name} - visa details already in job content")
+                                return None
+                            
+                            # Also check in job description from jobs list
+                            job_obj = next((j for j in jobs if str(j.url) == job_url), None)
+                            if job_obj and job_obj.description:
+                                if has_visa_details_in_content(job_obj.description):
+                                    logger.debug(f"Skipping sponsorship check for {company_name} - visa details already in job description")
+                                    return None
                             
                             # Clean company name
                             cleaned_name = clean_company_name(company_name)
@@ -3291,13 +3404,39 @@ Be strict with scoring:
                 key_matches_str = ', '.join(entry.get("key_matches", [])[:5])
                 summary_parts.append(f"Key matching skills: {key_matches_str}.")
             
-            # Add requirements info
+            # Add requirements info (truncate long entries to prevent summary from being too long)
             if requirements_satisfied:
-                satisfied_str = ', '.join(requirements_satisfied[:2])
+                # Truncate each requirement to max 100 chars to keep summary manageable
+                truncated_satisfied = []
+                for req in requirements_satisfied[:2]:
+                    if len(req) > 100:
+                        # Truncate at word boundary
+                        truncated = req[:100]
+                        last_space = truncated.rfind(' ')
+                        if last_space > 80:  # If we can find a space in last 20 chars
+                            truncated_satisfied.append(req[:last_space] + "...")
+                        else:
+                            truncated_satisfied.append(req[:97] + "...")
+                    else:
+                        truncated_satisfied.append(req)
+                satisfied_str = ', '.join(truncated_satisfied)
                 summary_parts.append(f"Requirements met: {satisfied_str}.")
             
             if requirements_missing:
-                missing_str = ', '.join(requirements_missing[:2])
+                # Truncate each requirement to max 100 chars to keep summary manageable
+                truncated_missing = []
+                for req in requirements_missing[:2]:
+                    if len(req) > 100:
+                        # Truncate at word boundary
+                        truncated = req[:100]
+                        last_space = truncated.rfind(' ')
+                        if last_space > 80:  # If we can find a space in last 20 chars
+                            truncated_missing.append(req[:last_space] + "...")
+                        else:
+                            truncated_missing.append(req[:97] + "...")
+                    else:
+                        truncated_missing.append(req)
+                missing_str = ', '.join(truncated_missing)
                 summary_parts.append(f"Areas to improve: {missing_str}.")
             
             # Combine into summary
@@ -3307,10 +3446,7 @@ Be strict with scoring:
             if len(summary_text) < 100:
                 summary_text = f"Match score: {score:.1%}. {summary_text} This is {'a strong' if score >= 0.7 else 'a good' if score >= 0.5 else 'a weak'} match for {candidate_profile.name} applying to {job.job_title} at {job.company}."
             
-            # Truncate if too long
-            if len(summary_text) > 500:
-                summary_text = summary_text[:497] + "..."
-            
+            # Don't truncate here - let the smart truncation below handle it at sentence/word boundaries
             text = summary_text.strip()
 
             try:
@@ -3324,26 +3460,45 @@ Be strict with scoring:
                     text = "\n".join(lines[1:-1])
                     text = text.strip()
                 
-                # Truncate at sentence boundary if too long (max 500 chars, but prefer complete sentences)
+                # Truncate at sentence boundary if too long (max 500 chars, but ALWAYS respect word boundaries)
                 max_length = 500
                 if len(text) > max_length:
                     # Find the last complete sentence before max_length
                     truncated = text[:max_length]
-                    # Try to find the last sentence ending
+                    
+                    # Try to find the last sentence ending (period, exclamation, question mark)
                     last_period = truncated.rfind('.')
                     last_exclamation = truncated.rfind('!')
                     last_question = truncated.rfind('?')
                     last_sentence_end = max(last_period, last_exclamation, last_question)
                     
-                    if last_sentence_end > max_length * 0.7:  # Only use if we're keeping at least 70% of max
-                        text = text[:last_sentence_end + 1]
+                    # Use sentence boundary if it's reasonable (at least 70% of max length)
+                    if last_sentence_end > max_length * 0.7:
+                        text = text[:last_sentence_end + 1].strip()
                     else:
-                        # If no good sentence boundary, just truncate at word boundary
+                        # No good sentence boundary - find word boundary (NEVER cut mid-word)
                         last_space = truncated.rfind(' ')
+                        
+                        # Use word boundary if it's reasonable (at least 70% of max length)
                         if last_space > max_length * 0.7:
-                            text = text[:last_space] + "..."
+                            text = text[:last_space].strip() + "..."
                         else:
-                            text = truncated + "..."
+                            # Last resort: find ANY space before max_length to avoid cutting mid-word
+                            # Search backwards from max_length to find a space (more aggressive search)
+                            search_start = max(0, max_length - 100)  # Search in last 100 chars
+                            last_space_fallback = truncated.rfind(' ', search_start)
+                            
+                            if last_space_fallback > max_length * 0.5:  # At least 50% of max length
+                                text = text[:last_space_fallback].strip() + "..."
+                            else:
+                                # If we still can't find a good space, try to find ANY space in the entire truncated text
+                                any_space = truncated.rfind(' ')
+                                if any_space > 0:
+                                    text = text[:any_space].strip() + "..."
+                                else:
+                                    # Absolute last resort: truncate at max_length but add ellipsis
+                                    # This should never happen in practice, but ensures we never exceed max_length
+                                    text = truncated.strip() + "..."
 
                 print(f"✓ Summarized rank {rank}: {job.job_title} ({len(text)} chars)")
 
@@ -3622,19 +3777,26 @@ Be strict with scoring:
                     summary_text = re.sub(r'\s+([,.;])\s+', r'\1 ', summary_text)
                     summary_text = re.sub(r'\s+([,.;])\s*$', '', summary_text)
                     
-                    # Add actual sponsorship information if found
-                    if sponsorship_info.sponsors_workers:
-                        sponsorship_text = f"Visa Sponsorship: {sponsorship_info.company_name} is a registered UK visa sponsor"
-                        if sponsorship_info.visa_types:
-                            sponsorship_text += f" (Visa Routes: {sponsorship_info.visa_types})"
-                        sponsorship_text += "."
-                        
-                        if "visa sponsor" not in summary_text.lower() and "visa sponsorship" not in summary_text.lower():
-                            summary_text = f"{summary_text} {sponsorship_text}" if summary_text else sponsorship_text
+                    # Remove any sponsorship-related text from summary (sponsorship info goes to separate field)
+                    # Remove patterns that might have been added by previous logic
+                    sponsorship_patterns_to_remove = [
+                        r'Visa\s+Sponsorship[^.]*\.',
+                        r'visa\s+sponsor[^.]*\.',
+                        r'registered\s+UK\s+visa\s+sponsor[^.]*\.',
+                        r'Visa\s+Routes[^.]*\.',
+                    ]
+                    
+                    for pattern in sponsorship_patterns_to_remove:
+                        summary_text = re.sub(pattern, '', summary_text, flags=re.IGNORECASE)
+                    
+                    # Normalize whitespace again after removal
+                    summary_text = re.sub(r'\s+', ' ', summary_text).strip()
+                    summary_text = re.sub(r'\s+([,.;])\s+', r'\1 ', summary_text)
+                    summary_text = re.sub(r'\s+([,.;])\s*$', '', summary_text)
                     
                     summary_text = clean_summary_text(summary_text)
                     top_job.summary = summary_text
-                    logger.debug("Updated matched job summary with actual sponsorship information")
+                    logger.debug("Removed sponsorship details from summary (sponsorship info is in separate field)")
             
             # Schedule sponsorship save in background
             if sponsorship_info and user_id:
@@ -3738,6 +3900,312 @@ Be strict with scoring:
 
 
 
+
+
+@app.post("/api/match-jobs/stream")
+async def match_jobs_stream(
+    json_body: Optional[str] = Form(default=None),
+    pdf_file: Optional[UploadFile] = File(default=None),
+    settings: Settings = Depends(get_settings),
+    background_tasks: BackgroundTasks = BackgroundTasks(),
+):
+    """
+    Streaming version of match-jobs endpoint.
+    Streams scoring progress as Server-Sent Events (SSE) as the LLM generates responses.
+    Returns the same data as /api/match-jobs but streams progress updates.
+    """
+    async def generate_stream():
+        try:
+            from openai import OpenAI
+            
+            request_id = make_request_id()
+            start_time = time.time()
+            openai_key = settings.openai_api_key or os.getenv("OPENAI_API_KEY")
+            
+            if not openai_key:
+                yield f"data: {json.dumps({'type': 'error', 'error': 'OpenAI API key not configured'})}\n\n"
+                return
+            
+            client = OpenAI(api_key=openai_key)
+            
+            # Send initial status
+            yield f"data: {json.dumps({'type': 'status', 'status': 'parsing', 'request_id': request_id, 'message': 'Parsing request...'})}\n\n"
+            
+            # Parse request (reuse logic from match_jobs)
+            # This is a simplified version - in production, extract the full parsing logic
+            data: Optional[MatchJobsRequest] = None
+            legacy_data: Optional[MatchJobsJsonRequest] = None
+            new_format_jobs: Optional[Dict[str, Any]] = None
+            jobs_string: Optional[str] = None
+            user_id: Optional[str] = None
+            
+            if json_body:
+                clean_json = json_body.strip()
+                if clean_json.startswith('"') and clean_json.endswith('"'):
+                    clean_json = clean_json[1:-1].replace('\\"', '"')
+                payload = json.loads(clean_json)
+                
+                if "jobs" in payload and isinstance(payload["jobs"], dict):
+                    new_format_jobs = payload["jobs"]
+                    user_id = payload.get("user_id")
+                elif "jobs" in payload and isinstance(payload["jobs"], str):
+                    jobs_string = payload["jobs"]
+                    user_id = payload.get("user_id")
+                elif "resume" in payload and "jobs" in payload:
+                    data = MatchJobsRequest(**payload)
+                else:
+                    try:
+                        legacy_data = MatchJobsJsonRequest(**payload)
+                    except:
+                        yield f"data: {json.dumps({'type': 'error', 'error': 'Invalid request format'})}\n\n"
+                        return
+            
+            # Get resume
+            resume_bytes: Optional[bytes] = None
+            if data and data.resume and data.resume.content:
+                resume_bytes = decode_base64_pdf(data.resume.content)
+            elif legacy_data and legacy_data.pdf:
+                resume_bytes = decode_base64_pdf(legacy_data.pdf)
+            elif pdf_file is not None:
+                pdf_file.file.seek(0)
+                resume_bytes = await pdf_file.read()
+            
+            if not resume_bytes:
+                yield f"data: {json.dumps({'type': 'error', 'error': 'Missing resume PDF'})}\n\n"
+                return
+            
+            yield f"data: {json.dumps({'type': 'status', 'status': 'parsing_resume', 'message': 'Parsing resume...'})}\n\n"
+            
+            # Parse resume
+            resume_text = extract_text_from_pdf_bytes(resume_bytes)
+            from resume_parser_ocr import parse_resume_with_llm_fallback
+            candidate_profile = await asyncio.to_thread(parse_resume_with_llm_fallback, resume_text, openai_key)
+            
+            yield f"data: {json.dumps({'type': 'status', 'status': 'extracting_jobs', 'message': 'Extracting job information...'})}\n\n"
+            
+            # Extract jobs (simplified - handle new_format_jobs case)
+            jobs = []
+            if new_format_jobs:
+                raw_job_title = new_format_jobs.get("jobtitle", "")
+                job_link = new_format_jobs.get("joblink", "")
+                job_data = new_format_jobs.get("jobdata", "")
+                
+                from job_extractor import extract_company_and_title_from_raw_data
+                extracted_info = await asyncio.to_thread(
+                    extract_company_and_title_from_raw_data,
+                    job_data,
+                    openai_key,
+                    "gpt-4o-mini"
+                )
+                
+                extracted_company = extracted_info.get("company_name")
+                extracted_title = extracted_info.get("job_title")
+                final_job_title = extracted_title or raw_job_title or "Job title not available in posting"
+                final_company = extracted_company or "Company name not available in posting"
+                
+                if final_job_title and final_job_title != "Job title not available in posting":
+                    cleaned_title = clean_job_title(final_job_title)
+                    if cleaned_title and len(cleaned_title) >= 5:
+                        final_job_title = cleaned_title
+                    else:
+                        final_job_title = raw_job_title.strip() if raw_job_title else "Job title not available in posting"
+                
+                job = JobPosting(
+                    url=job_link if job_link else "https://example.com",
+                    job_title=final_job_title,
+                    company=final_company,
+                    description=job_data,
+                    skills_needed=[],
+                    experience_level=None,
+                    salary=None
+                )
+                jobs = [job]
+            
+            if not jobs:
+                yield f"data: {json.dumps({'type': 'error', 'error': 'No jobs found'})}\n\n"
+                return
+            
+            yield f"data: {json.dumps({'type': 'status', 'status': 'scoring', 'message': f'Scoring {len(jobs)} job(s)...', 'jobs_count': len(jobs)})}\n\n"
+            
+            # Stream scoring for each job
+            scored_jobs = []
+            for idx, job in enumerate(jobs, 1):
+                yield f"data: {json.dumps({'type': 'job_start', 'job_index': idx, 'total_jobs': len(jobs), 'job_title': job.job_title, 'company': job.company})}\n\n"
+                
+                # Create scoring prompt
+                prompt = f"""
+Analyze the match between candidate and job. Consider ALL requirements from the job description.
+
+Candidate Profile:
+{json.dumps(candidate_profile.dict(), indent=2)}
+
+Job Details:
+- Title: {job.job_title}
+- Company: {job.company}
+- URL: {str(job.url)}
+- Description: {job.description[:2000]}
+
+Return ONLY valid JSON (no markdown) with the following structure:
+{{
+  "match_score": 0.75,
+  "key_matches": ["skill1", "skill2"],
+  "requirements_met": 5,
+  "total_requirements": 8,
+  "requirements_satisfied": ["Java (candidate has 3 years experience)"],
+  "requirements_missing": ["Kubernetes (not mentioned in candidate profile)"],
+  "improvements_needed": ["Learn Docker and Kubernetes"],
+  "reasoning": "Brief explanation of score"
+}}
+"""
+                
+                # Stream the scoring response
+                # Note: Some models don't support temperature=0, so we omit it to use default
+                full_response = ""
+                stream = client.chat.completions.create(
+                    model=settings.model_name or "gpt-4o-mini",
+                    messages=[{"role": "user", "content": prompt}],
+                    stream=True
+                )
+                
+                for chunk in stream:
+                    if chunk.choices[0].delta.content is not None:
+                        content = chunk.choices[0].delta.content
+                        full_response += content
+                        # Stream each token as it arrives
+                        yield f"data: {json.dumps({'type': 'token', 'job_index': idx, 'content': content})}\n\n"
+                
+                # Parse the response
+                from agents import extract_json_from_response
+                data_result = extract_json_from_response(full_response)
+                
+                if not data_result or data_result.get("match_score") is None:
+                    data_result = data_result or {}
+                    data_result["match_score"] = 0.5
+                
+                score = float(data_result.get("match_score", 0.5))
+                requirements_satisfied_list = data_result.get("requirements_satisfied", []) or []
+                requirements_missing_list = data_result.get("requirements_missing", []) or []
+                requirements_met = int(data_result.get("requirements_met", 0))
+                total_requirements = int(data_result.get("total_requirements", 0))
+                
+                if total_requirements == 0:
+                    total_requirements = len(requirements_satisfied_list) + len(requirements_missing_list)
+                    if total_requirements == 0:
+                        total_requirements = 1
+                    requirements_met = len(requirements_satisfied_list)
+                
+                if requirements_met > total_requirements:
+                    requirements_met = total_requirements
+                
+                scored_jobs.append({
+                    "job": job,
+                    "match_score": score,
+                    "key_matches": data_result.get("key_matches", []) or [],
+                    "requirements_met": requirements_met,
+                    "total_requirements": total_requirements,
+                    "requirements_satisfied": requirements_satisfied_list,
+                    "requirements_missing": requirements_missing_list,
+                    "improvements_needed": data_result.get("improvements_needed", []) or [],
+                    "reasoning": data_result.get("reasoning", "Score calculated based on candidate-job alignment"),
+                })
+                
+                yield f"data: {json.dumps({'type': 'job_complete', 'job_index': idx, 'match_score': score, 'job_title': job.job_title})}\n\n"
+            
+            # Sort by score
+            scored_jobs.sort(key=lambda x: x["match_score"], reverse=True)
+            top_matches = [s for s in scored_jobs if s["match_score"] >= 0.5][:10]
+            
+            if not top_matches:
+                yield f"data: {json.dumps({'type': 'error', 'error': 'No jobs matched with score >= 0.5'})}\n\n"
+                return
+            
+            yield f"data: {json.dumps({'type': 'status', 'status': 'summarizing', 'message': f'Summarizing {len(top_matches)} matched job(s)...'})}\n\n"
+            
+            # Create matched jobs (simplified summarization)
+            matched_jobs_list = []
+            for idx, entry in enumerate(top_matches, 1):
+                job = entry["job"]
+                score = entry["match_score"]
+                
+                # Create summary
+                summary_parts = [f"Match score: {score:.1%}."]
+                if entry.get("reasoning"):
+                    summary_parts.append(entry["reasoning"][:200])
+                if entry.get("key_matches"):
+                    matches_str = ', '.join(entry["key_matches"][:3])
+                    summary_parts.append(f"Key matches: {matches_str}.")
+                
+                summary_text = " ".join(summary_parts)
+                if len(summary_text) > 500:
+                    summary_text = summary_text[:497] + "..."
+                
+                matched_job = {
+                    "rank": idx,
+                    "job_url": str(job.url),
+                    "job_title": job.job_title or "Unknown",
+                    "company": job.company or "Unknown",
+                    "match_score": round(score, 3),
+                    "summary": summary_text,
+                    "key_matches": entry["key_matches"],
+                    "requirements_met": entry["requirements_met"],
+                    "total_requirements": entry["total_requirements"],
+                    "requirements_satisfied": entry["requirements_satisfied"],
+                    "requirements_missing": entry["requirements_missing"],
+                    "improvements_needed": entry["improvements_needed"],
+                    "location": None,
+                    "scraped_summary": None
+                }
+                matched_jobs_list.append(matched_job)
+            
+            # Check sponsorship (simplified)
+            sponsorship_info = None
+            if jobs and jobs[0].company:
+                from sponsorship_checker import check_sponsorship
+                cleaned_name = clean_company_name(jobs[0].company)
+                if cleaned_name:
+                    try:
+                        sponsorship_result = await asyncio.to_thread(
+                            check_sponsorship, cleaned_name, jobs[0].description, openai_key
+                        )
+                        if sponsorship_result:
+                            sponsorship_info = {
+                                "company_name": sponsorship_result.get("company_name"),
+                                "sponsors_workers": sponsorship_result.get("sponsors_workers", False),
+                                "visa_types": sponsorship_result.get("visa_types"),
+                                "summary": sponsorship_result.get("summary", "No sponsorship information available")
+                            }
+                    except:
+                        pass
+            
+            # Send final response
+            processing_time = f"{time.time() - start_time:.1f}s"
+            final_response = {
+                "candidate_profile": candidate_profile.dict(),
+                "matched_jobs": matched_jobs_list,
+                "processing_time": processing_time,
+                "jobs_analyzed": len(jobs),
+                "request_id": request_id,
+                "sponsorship": sponsorship_info
+            }
+            
+            yield f"data: {json.dumps({'type': 'complete', 'response': final_response})}\n\n"
+            yield f"data: {json.dumps({'type': 'done'})}\n\n"
+            
+        except Exception as e:
+            import traceback
+            error_msg = str(e)
+            logger.error(f"Streaming error: {error_msg}", exc_info=True)
+            yield f"data: {json.dumps({'type': 'error', 'error': error_msg, 'traceback': traceback.format_exc()})}\n\n"
+    
+    return StreamingResponse(
+        generate_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        }
+    )
 
 
 @app.get("/")
