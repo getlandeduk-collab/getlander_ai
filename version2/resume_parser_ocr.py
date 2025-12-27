@@ -363,31 +363,33 @@ def parse_resume_with_llm_fallback(
     openai_api_key: Optional[str] = None
 ) -> Dict[str, Any]:
     """
-    Parse resume directly with LLM (OCR removed for speed and accuracy).
+    Parse resume with LLM using OCR-extracted text.
     
     Args:
-        resume_text: Raw text from PDF
+        resume_text: OCR-extracted text from PDF (already extracted using pdfplumber)
         model_name: OpenAI model name
         openai_api_key: OpenAI API key
         
     Returns:
         Parsed resume dictionary
     """
-    # Use LLM directly (fast and accurate with gpt-4o-mini)
-    logger.info("Parsing resume with LLM")
+    # Parse OCR-extracted text with direct OpenAI API call (faster than agent)
+    logger.info("Parsing OCR-extracted text with direct LLM API call")
     try:
-        from agents import build_resume_parser
+        from openai import OpenAI
         import os
         
-        if openai_api_key:
-            os.environ["OPENAI_API_KEY"] = openai_api_key
+        if not openai_api_key:
+            openai_api_key = os.getenv("OPENAI_API_KEY")
         
-        resume_agent = build_resume_parser(model_name)
+        if not openai_api_key:
+            raise ValueError("OpenAI API key is required")
         
-        resume_prompt = f"""
-You are extracting structured data from a resume. Read the ENTIRE resume text below and extract information accurately.
+        client = OpenAI(api_key=openai_api_key)
+        
+        resume_prompt = f"""You are extracting structured data from a resume. Read the ENTIRE resume text below and extract information accurately.
 
-RESUME TEXT:
+RESUME TEXT (OCR-extracted from PDF):
 {resume_text}
 
 CRITICAL EXTRACTION RULES:
@@ -448,24 +450,26 @@ REMEMBER:
 - Do NOT include education text in experience_summary
 - Do NOT include random text fragments
 - Read the resume carefully and extract what's actually there
-"""
+
+Return ONLY valid JSON, no markdown formatting."""
         
-        resume_response = resume_agent.run(resume_prompt)
+        # Direct OpenAI API call (faster than agent)
+        # Note: Some models don't support temperature=0, so we omit it to use default
+        response = client.chat.completions.create(
+            model=model_name or "gpt-4o-mini",
+            messages=[{"role": "user", "content": resume_prompt}],
+            response_format={"type": "json_object"} if "gpt-4" in (model_name or "").lower() or ("o1" in (model_name or "").lower() and "gpt-5" not in (model_name or "").lower()) else None
+        )
         
-        # Extract response text
-        if hasattr(resume_response, 'content'):
-            response_text = str(resume_response.content)
-        elif hasattr(resume_response, 'messages') and resume_response.messages:
-            last_msg = resume_response.messages[-1]
-            response_text = str(last_msg.content if hasattr(last_msg, 'content') else last_msg)
-        else:
-            response_text = str(resume_response)
+        response_text = response.choices[0].message.content.strip()
         
-        response_text = response_text.strip()
-        
-        # Extract JSON
-        from agents import extract_json_from_response
-        resume_json = extract_json_from_response(response_text)
+        # Parse JSON response
+        try:
+            resume_json = json.loads(response_text)
+        except json.JSONDecodeError:
+            # Fallback: try to extract JSON from response
+            from agents import extract_json_from_response
+            resume_json = extract_json_from_response(response_text)
         
         if resume_json:
             logger.info("LLM parsing successful")

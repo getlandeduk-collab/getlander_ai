@@ -2091,15 +2091,16 @@ async def match_jobs(
 
 
 
-        # STEP 1: Parse Resume (Direct LLM parsing for accuracy and speed)
-        logger.info("Parsing resume with LLM")
+        # STEP 1: Parse Resume (OCR extracts text, then LLM parses it)
+        logger.info("Step 1: OCR extracted text from PDF, now parsing with LLM")
         
         from resume_parser_ocr import parse_resume_with_llm_fallback
         
-        # Use LLM directly (gpt-4o-mini is fast and accurate)
+        # Extract complete text from PDF using OCR (already done above with extract_text_from_pdf_bytes)
+        # Now give that complete OCR-extracted text directly to LLM for parsing
         resume_json = await asyncio.to_thread(
             parse_resume_with_llm_fallback,
-            resume_text,
+            resume_text,  # Complete OCR-extracted text from PDF
             settings.model_name,
             settings.openai_api_key
         )
@@ -3379,132 +3380,118 @@ Be strict with scoring:
 
         def summarize_sync(entry: Dict[str, Any], rank: int) -> MatchedJob:
 
-            """Generate summary for a matched job."""
+            """Generate summary for a matched job using the summarizer agent."""
 
             job: JobPosting = entry["job"]
 
             score = entry["match_score"]
 
-            
-
-            # Use scoring reasoning directly and enhance it slightly for faster processing
             scoring_reasoning = entry.get("reasoning", "")
             requirements_satisfied = entry.get("requirements_satisfied", [])[:3]
             requirements_missing = entry.get("requirements_missing", [])[:3]
+            key_matches = entry.get("key_matches", [])[:5]
             
-            # Build summary from scoring output (much faster than generating new one)
-            summary_parts = []
-            
-            if scoring_reasoning:
-                # Use the reasoning from scoring (already analyzed)
-                summary_parts.append(scoring_reasoning[:200])  # First 200 chars of reasoning
-            
-            # Add key matches
-            if entry.get("key_matches"):
-                key_matches_str = ', '.join(entry.get("key_matches", [])[:5])
-                summary_parts.append(f"Key matching skills: {key_matches_str}.")
-            
-            # Add requirements info (truncate long entries to prevent summary from being too long)
-            if requirements_satisfied:
-                # Truncate each requirement to max 100 chars to keep summary manageable
-                truncated_satisfied = []
-                for req in requirements_satisfied[:2]:
-                    if len(req) > 100:
-                        # Truncate at word boundary
-                        truncated = req[:100]
-                        last_space = truncated.rfind(' ')
-                        if last_space > 80:  # If we can find a space in last 20 chars
-                            truncated_satisfied.append(req[:last_space] + "...")
-                        else:
-                            truncated_satisfied.append(req[:97] + "...")
-                    else:
-                        truncated_satisfied.append(req)
-                satisfied_str = ', '.join(truncated_satisfied)
-                summary_parts.append(f"Requirements met: {satisfied_str}.")
-            
-            if requirements_missing:
-                # Truncate each requirement to max 100 chars to keep summary manageable
-                truncated_missing = []
-                for req in requirements_missing[:2]:
-                    if len(req) > 100:
-                        # Truncate at word boundary
-                        truncated = req[:100]
-                        last_space = truncated.rfind(' ')
-                        if last_space > 80:  # If we can find a space in last 20 chars
-                            truncated_missing.append(req[:last_space] + "...")
-                        else:
-                            truncated_missing.append(req[:97] + "...")
-                    else:
-                        truncated_missing.append(req)
-                missing_str = ', '.join(truncated_missing)
-                summary_parts.append(f"Areas to improve: {missing_str}.")
-            
-            # Combine into summary
-            summary_text = " ".join(summary_parts)
-            
-            # If summary is too short, enhance it slightly
-            if len(summary_text) < 100:
-                summary_text = f"Match score: {score:.1%}. {summary_text} This is {'a strong' if score >= 0.7 else 'a good' if score >= 0.5 else 'a weak'} match for {candidate_profile.name} applying to {job.job_title} at {job.company}."
-            
-            # Don't truncate here - let the smart truncation below handle it at sentence/word boundaries
-            text = summary_text.strip()
+            # Build simple prompt for summarizer agent
+            summary_prompt = f"""Create a concise analysis summary (under 500 characters) for this job match.
 
+Match Score: {score:.1%}
+Job Title: {job.job_title}
+Company: {job.company}
+Candidate: {candidate_profile.name}
+
+Scoring Reasoning: {scoring_reasoning[:300] if scoring_reasoning else "N/A"}
+
+Key Matching Skills: {', '.join(key_matches) if key_matches else "N/A"}
+
+Requirements Satisfied:
+{chr(10).join(f"- {req}" for req in requirements_satisfied[:2]) if requirements_satisfied else "N/A"}
+
+Requirements Missing:
+{chr(10).join(f"- {req}" for req in requirements_missing[:2]) if requirements_missing else "N/A"}
+
+Job Description:
+{job.description[:1000] if job.description else "N/A"}
+
+Generate a concise summary that:
+1. States the match score and fit assessment
+2. Explains key matching skills
+3. Highlights areas that need improvement
+4. Keep it under 500 characters and end at a complete sentence."""
+
+            text = ""
             try:
-                # Skip LLM call - use scoring output directly for speed (saves 2-3 seconds per job)
-                # Clean markdown formatting inconsistencies
+                # Use the summarizer agent (simple method)
+                summary_response = summarizer_agent.run(summary_prompt)
+                
+                # Extract response content
+                if hasattr(summary_response, "content"):
+                    text = str(summary_response.content).strip()
+                elif hasattr(summary_response, "messages") and summary_response.messages:
+                    last_msg = summary_response.messages[-1]
+                    text = str(last_msg.content if hasattr(last_msg, "content") else last_msg).strip()
+                else:
+                    text = str(summary_response).strip()
+                
+                # Clean markdown formatting if present
                 text = clean_summary_text(text)
                 
-                # Strip markdown code fences if present (additional check after cleaning)
+                # Strip markdown code fences if present
                 if text.startswith("```"):
                     lines = text.split("\n")
                     text = "\n".join(lines[1:-1])
                     text = text.strip()
                 
-                # Truncate at sentence boundary if too long (max 500 chars, but ALWAYS respect word boundaries)
-                max_length = 500
-                if len(text) > max_length:
-                    # Find the last complete sentence before max_length
-                    truncated = text[:max_length]
-                    
-                    # Try to find the last sentence ending (period, exclamation, question mark)
+                # Truncate to 500 characters at last complete sentence
+                if len(text) > 500:
+                    truncated = text[:500]
+                    # Find last complete sentence
                     last_period = truncated.rfind('.')
                     last_exclamation = truncated.rfind('!')
                     last_question = truncated.rfind('?')
                     last_sentence_end = max(last_period, last_exclamation, last_question)
                     
-                    # Use sentence boundary if it's reasonable (at least 70% of max length)
-                    if last_sentence_end > max_length * 0.7:
+                    if last_sentence_end > 400:  # At least 80% of max
                         text = text[:last_sentence_end + 1].strip()
                     else:
-                        # No good sentence boundary - find word boundary (NEVER cut mid-word)
+                        # Find word boundary (NEVER cut mid-word)
                         last_space = truncated.rfind(' ')
-                        
-                        # Use word boundary if it's reasonable (at least 70% of max length)
-                        if last_space > max_length * 0.7:
-                            text = text[:last_space].strip() + "..."
+                        if last_space > 400:
+                            text = text[:last_space].strip() + "."
                         else:
-                            # Last resort: find ANY space before max_length to avoid cutting mid-word
-                            # Search backwards from max_length to find a space (more aggressive search)
-                            search_start = max(0, max_length - 100)  # Search in last 100 chars
+                            # Find any space in the last 100 chars
+                            search_start = max(0, 500 - 100)
                             last_space_fallback = truncated.rfind(' ', search_start)
-                            
-                            if last_space_fallback > max_length * 0.5:  # At least 50% of max length
-                                text = text[:last_space_fallback].strip() + "..."
+                            if last_space_fallback > 350:
+                                text = text[:last_space_fallback].strip() + "."
                             else:
-                                # If we still can't find a good space, try to find ANY space in the entire truncated text
+                                # Find ANY space
                                 any_space = truncated.rfind(' ')
                                 if any_space > 0:
-                                    text = text[:any_space].strip() + "..."
+                                    text = text[:any_space].strip() + "."
                                 else:
-                                    # Absolute last resort: truncate at max_length but add ellipsis
-                                    # This should never happen in practice, but ensures we never exceed max_length
-                                    text = truncated.strip() + "..."
-
-                print(f"✓ Summarized rank {rank}: {job.job_title} ({len(text)} chars)")
+                                    text = truncated.strip() + "."
+                
+                # Ensure it ends with proper punctuation
+                if text and text[-1] not in ['.', '!', '?']:
+                    text = text.rstrip() + "."
+                
+                logger.debug(f"✓ Summarized rank {rank}: {job.job_title} ({len(text)} chars)")
 
             except Exception as e:
-                print(f"❌ Error summarizing rank {rank}: {e}")
-                text = f"Match score: {score:.1%}. {entry.get('reasoning', '')}"
+                logger.error(f"❌ Error summarizing rank {rank}: {e}")
+                # Fallback to simple summary
+                text = f"Match score: {score:.1%}. {scoring_reasoning[:300] if scoring_reasoning else 'Score calculated based on candidate-job alignment'}."
+                if len(text) > 500:
+                    truncated = text[:500]
+                    last_period = truncated.rfind('.')
+                    if last_period > 400:
+                        text = text[:last_period + 1].strip()
+                    else:
+                        last_space = truncated.rfind(' ')
+                        if last_space > 400:
+                            text = text[:last_space].strip() + "."
+                        else:
+                            text = truncated.strip() + "."
 
             
 
@@ -4254,15 +4241,28 @@ async def get_user_resumes(request: GetUserResumesRequest):
 
         
 
-        # Convert to Pydantic models
-
-        resumes = [
-
-            FirebaseResume(**resume_data)
-
-            for resume_data in resumes_data
-
-        ]
+        # Convert to Pydantic models with better error handling
+        resumes = []
+        for idx, resume_data in enumerate(resumes_data):
+            try:
+                # Ensure 'id' field is present
+                if "id" not in resume_data:
+                    logger.warning(f"Resume at index {idx} missing 'id' field, skipping")
+                    continue
+                
+                # Convert to FirebaseResume model
+                resume = FirebaseResume(**resume_data)
+                resumes.append(resume)
+            except ValidationError as ve:
+                logger.error(f"Validation error for resume at index {idx}: {ve}")
+                logger.error(f"Resume data: {resume_data}")
+                # Skip invalid resumes but continue processing others
+                continue
+            except Exception as e:
+                logger.error(f"Error processing resume at index {idx}: {e}")
+                logger.error(f"Resume data: {resume_data}")
+                # Skip problematic resumes but continue processing others
+                continue
 
         
 
@@ -4278,6 +4278,7 @@ async def get_user_resumes(request: GetUserResumesRequest):
 
     except ImportError as e:
 
+        logger.error(f"Import error in get_user_resumes: {e}")
         raise HTTPException(
 
             status_code=500,
@@ -4286,8 +4287,19 @@ async def get_user_resumes(request: GetUserResumesRequest):
 
         )
 
+    except ValidationError as ve:
+        logger.error(f"Validation error in get_user_resumes: {ve}")
+        raise HTTPException(
+
+            status_code=422,
+
+            detail=f"Invalid request data: {str(ve)}"
+
+        )
+
     except Exception as e:
 
+        logger.error(f"Error in get_user_resumes: {e}", exc_info=True)
         raise HTTPException(
 
             status_code=500,
