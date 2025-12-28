@@ -3979,7 +3979,8 @@ async def match_jobs_stream(
             # Parse resume
             resume_text = extract_text_from_pdf_bytes(resume_bytes)
             from resume_parser_ocr import parse_resume_with_llm_fallback
-            candidate_profile = await asyncio.to_thread(parse_resume_with_llm_fallback, resume_text, openai_key)
+            model_name = settings.model_name or "gpt-4o-mini"
+            candidate_profile = await asyncio.to_thread(parse_resume_with_llm_fallback, resume_text, model_name, openai_key)
             
             yield f"data: {json.dumps({'type': 'status', 'status': 'extracting_jobs', 'message': 'Extracting job information...'})}\n\n"
             
@@ -4037,7 +4038,7 @@ async def match_jobs_stream(
 Analyze the match between candidate and job. Consider ALL requirements from the job description.
 
 Candidate Profile:
-{json.dumps(candidate_profile.dict(), indent=2)}
+{json.dumps(candidate_profile, indent=2)}
 
 Job Details:
 - Title: {job.job_title}
@@ -4180,7 +4181,7 @@ Return ONLY valid JSON (no markdown) with the following structure:
             # Send final response
             processing_time = f"{time.time() - start_time:.1f}s"
             final_response = {
-                "candidate_profile": candidate_profile.dict(),
+                "candidate_profile": candidate_profile,
                 "matched_jobs": matched_jobs_list,
                 "processing_time": processing_time,
                 "jobs_analyzed": len(jobs),
