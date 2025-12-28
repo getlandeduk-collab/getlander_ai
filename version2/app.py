@@ -3901,7 +3901,21 @@ async def match_jobs_stream(
     Streams scoring progress as Server-Sent Events (SSE) as the LLM generates responses.
     Returns the same data as /api/match-jobs but streams progress updates.
     """
-    async def generate_stream():
+    # CRITICAL: Read file contents into memory BEFORE starting the stream
+    # The UploadFile object gets closed after the request handler returns,
+    # so we must read it before passing to the generator
+    resume_bytes_from_file: Optional[bytes] = None
+    if pdf_file is not None:
+        try:
+            resume_bytes_from_file = await pdf_file.read()
+        except Exception as e:
+            logger.error(f"Failed to read PDF file: {e}", exc_info=True)
+            return StreamingResponse(
+                content=f"data: {json.dumps({'type': 'error', 'error': f'Failed to read PDF file: {str(e)}'})}\n\n",
+                media_type="text/event-stream"
+            )
+    
+    async def generate_stream(resume_bytes_preloaded: Optional[bytes] = None):
         try:
             from openai import OpenAI
             
@@ -3947,15 +3961,14 @@ async def match_jobs_stream(
                         yield f"data: {json.dumps({'type': 'error', 'error': 'Invalid request format'})}\n\n"
                         return
             
-            # Get resume
+            # Get resume - use preloaded bytes if available
             resume_bytes: Optional[bytes] = None
             if data and data.resume and data.resume.content:
                 resume_bytes = decode_base64_pdf(data.resume.content)
             elif legacy_data and legacy_data.pdf:
                 resume_bytes = decode_base64_pdf(legacy_data.pdf)
-            elif pdf_file is not None:
-                pdf_file.file.seek(0)
-                resume_bytes = await pdf_file.read()
+            elif resume_bytes_preloaded is not None:
+                resume_bytes = resume_bytes_preloaded
             
             if not resume_bytes:
                 yield f"data: {json.dumps({'type': 'error', 'error': 'Missing resume PDF'})}\n\n"
@@ -4185,7 +4198,7 @@ Return ONLY valid JSON (no markdown) with the following structure:
             yield f"data: {json.dumps({'type': 'error', 'error': error_msg, 'traceback': traceback.format_exc()})}\n\n"
     
     return StreamingResponse(
-        generate_stream(),
+        generate_stream(resume_bytes_from_file),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
