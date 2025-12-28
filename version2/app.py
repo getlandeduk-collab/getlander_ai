@@ -4062,18 +4062,73 @@ Return ONLY valid JSON (no markdown) with the following structure:
                 # Stream the scoring response
                 # Note: Some models don't support temperature=0, so we omit it to use default
                 full_response = ""
-                stream = client.chat.completions.create(
-                    model=settings.model_name or "gpt-4o-mini",
-                    messages=[{"role": "user", "content": prompt}],
-                    stream=True
-                )
                 
-                for chunk in stream:
-                    if chunk.choices[0].delta.content is not None:
-                        content = chunk.choices[0].delta.content
-                        full_response += content
-                        # Stream each token as it arrives
-                        yield f"data: {json.dumps({'type': 'token', 'job_index': idx, 'content': content})}\n\n"
+                # Use asyncio.Queue to handle synchronous stream in async context
+                chunk_queue = asyncio.Queue()
+                loop = asyncio.get_event_loop()
+                
+                def stream_openai_response():
+                    """Run OpenAI streaming in a thread and put chunks in async queue"""
+                    try:
+                        stream = client.chat.completions.create(
+                            model=settings.model_name or "gpt-4o-mini",
+                            messages=[{"role": "user", "content": prompt}],
+                            stream=True
+                        )
+                        for chunk in stream:
+                            if chunk.choices and len(chunk.choices) > 0 and chunk.choices[0].delta.content is not None:
+                                # Schedule put in event loop (thread-safe)
+                                asyncio.run_coroutine_threadsafe(
+                                    chunk_queue.put(chunk.choices[0].delta.content),
+                                    loop
+                                )
+                        # Signal completion
+                        asyncio.run_coroutine_threadsafe(chunk_queue.put(None), loop)
+                    except Exception as e:
+                        # Signal error
+                        asyncio.run_coroutine_threadsafe(
+                            chunk_queue.put(("error", str(e))),
+                            loop
+                        )
+                
+                # Start streaming in a thread
+                stream_task = loop.run_in_executor(None, stream_openai_response)
+                
+                # Yield chunks from queue as they arrive (non-blocking)
+                try:
+                    while True:
+                        try:
+                            # Wait for chunk (async, non-blocking)
+                            chunk_data = await chunk_queue.get()
+                            
+                            if chunk_data is None:
+                                # Stream complete
+                                break
+                            elif isinstance(chunk_data, tuple) and chunk_data[0] == "error":
+                                # Error occurred
+                                yield f"data: {json.dumps({'type': 'error', 'error': chunk_data[1]})}\n\n"
+                                break
+                            else:
+                                # Valid content chunk
+                                content = chunk_data
+                                full_response += content
+                                # Stream each token as it arrives
+                                yield f"data: {json.dumps({'type': 'token', 'job_index': idx, 'content': content})}\n\n"
+                        except Exception as e:
+                            logger.error(f"Error in streaming loop: {e}", exc_info=True)
+                            break
+                    # Ensure stream task completes (it should already be done, but await for cleanup)
+                    try:
+                        await stream_task
+                    except Exception:
+                        pass  # Task may have already completed or failed
+                except Exception as e:
+                    logger.error(f"Error in stream processing: {e}", exc_info=True)
+                    # Ensure we await the task even on error
+                    try:
+                        await stream_task
+                    except Exception:
+                        pass
                 
                 # Parse the response
                 from agents import extract_json_from_response
