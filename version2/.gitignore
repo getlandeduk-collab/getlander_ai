@@ -12,6 +12,7 @@ __pycache__/
 *.egg-info/
 dist/
 build/
+*.pyc
 
 # Environment & secrets
 .env
@@ -37,5 +38,25 @@ node_modules/
 npm-debug.log*
 package-lock.json
 yarn.lock
-.md 
+Frontend/
+frontend/
+
+# Documentation files
+*.md
 md/
+
+# Test files
+test_py/
+test_*.py
+*_test.py
+
+# Response files
+responses/
+
+# TypeScript files
+*.ts
+*.tsx
+
+# Frontend archives
+Frontend.zip
+frontend.zip
