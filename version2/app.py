@@ -3942,6 +3942,9 @@ async def match_jobs_stream(
         response_file_path.parent.mkdir(parents=True, exist_ok=True)
         response_file = None
         
+        # Capture background_tasks from outer scope for Firebase saves
+        # background_tasks is accessible via closure from match_jobs_stream function
+        
         try:
             from openai import OpenAI
             
@@ -4117,11 +4120,7 @@ Return ONLY valid JSON, no markdown formatting."""
                 # Parse resume with LLM (non-streaming for reliability)
                 logger.info("Calling LLM for resume parsing...")
                 
-                # Send progress update
-                yield format_sse_event("status", {
-                    "message": "Parsing resume with AI..."
-                })
-                await asyncio.sleep(0)  # Force flush
+                # No status update - resume_parsed event will be sent when complete
                 
                 def call_llm_sync():
                     """Call OpenAI API synchronously"""
@@ -4151,40 +4150,36 @@ Return ONLY valid JSON, no markdown formatting."""
                         logger.error(f"Traceback in call_llm_sync: {traceback.format_exc()}")
                         raise
                 
-                # Run LLM call in thread - simple approach
+                # Run LLM call in thread
                 logger.info("Starting LLM call in background thread...")
-                loop = asyncio.get_event_loop()
-                llm_task = loop.run_in_executor(None, call_llm_sync)
-                
-                # Wait for completion with timeout and progress updates
-                logger.info("Waiting for LLM response...")
-                start_wait = time.time()
-                last_progress = start_wait
-                
                 try:
-                    # Wait with timeout, checking progress periodically
-                    while not llm_task.done():
-                        await asyncio.sleep(0.3)  # Check every 300ms
-                        elapsed = time.time() - last_progress
-                        if elapsed >= 1.0:  # Yield progress every 1 second
-                            elapsed_total = int(time.time() - start_wait)
-                            yield format_sse_event("status", {
-                                "message": f"Parsing resume... ({elapsed_total}s)"
-                            })
-                            await asyncio.sleep(0)  # Force flush
-                            last_progress = time.time()
-                    
-                    # Get result
-                    logger.info("LLM task done, retrieving result...")
-                    full_response = await asyncio.wait_for(llm_task, timeout=5.0)  # Should be instant since done
-                    logger.info(f"LLM response received, total length: {len(full_response)}")
+                    # Use asyncio.to_thread if available (Python 3.9+), otherwise use run_in_executor
+                    if hasattr(asyncio, 'to_thread'):
+                        logger.info("Using asyncio.to_thread...")
+                        full_response = await asyncio.wait_for(
+                            asyncio.to_thread(call_llm_sync),
+                            timeout=120.0  # 2 minute timeout
+                        )
+                    else:
+                        logger.info("Using run_in_executor (Python < 3.9)...")
+                        loop = asyncio.get_event_loop()
+                        full_response = await asyncio.wait_for(
+                            loop.run_in_executor(None, call_llm_sync),
+                            timeout=120.0  # 2 minute timeout
+                        )
+                    logger.info(f"✅ LLM response received, total length: {len(full_response)}")
                     if not full_response or len(full_response) == 0:
                         logger.error("Empty response from LLM")
                         raise Exception("Empty response from LLM")
                     logger.info(f"LLM response preview: {full_response[:200]}...")
                     
+                    # Yield control to event loop before file operations
+                    await asyncio.sleep(0)
+                    logger.info("✅ Event loop yielded after LLM response")
+                    
                     # Write raw LLM response to file
                     if response_file:
+                        logger.info("Writing LLM response to file...")
                         response_file.write(f"=== RAW LLM RESPONSE (Resume Parsing) ===\n")
                         response_file.write(f"Time: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
                         response_file.write(f"Length: {len(full_response)} characters\n")
@@ -4193,7 +4188,7 @@ Return ONLY valid JSON, no markdown formatting."""
                         response_file.write(f"\n\n")
                         response_file.flush()
                         os.fsync(response_file.fileno())  # Force OS-level flush for real-time writing
-                        logger.info("Raw LLM response written to file")
+                        logger.info("✅ Raw LLM response written to file")
                 except asyncio.TimeoutError:
                     logger.error("LLM call timed out")
                     raise Exception("Resume parsing timed out")
@@ -4204,16 +4199,12 @@ Return ONLY valid JSON, no markdown formatting."""
                     raise llm_error
                 
                 # Parse the JSON response
-                logger.info(f"Parsing resume JSON response, length: {len(full_response)}")
-                
-                # Send progress update before parsing
-                yield format_sse_event("status", {
-                    "message": "Processing parsed resume data..."
-                })
-                await asyncio.sleep(0)  # Force flush
+                logger.info(f"✅ Starting JSON parsing, response length: {len(full_response)}")
+                await asyncio.sleep(0)  # Yield before parsing
                 
                 from agents import extract_json_from_response
                 candidate_profile = extract_json_from_response(full_response)
+                logger.info(f"✅ JSON parsing complete, candidate_profile type: {type(candidate_profile)}")
                 
                 if not candidate_profile:
                     logger.warning("Failed to extract JSON from resume parsing response, using fallback")
@@ -4229,10 +4220,14 @@ Return ONLY valid JSON, no markdown formatting."""
                         "interests": []
                     }
                 
-                logger.info(f"Resume parsing completed successfully, type: {type(candidate_profile)}")
+                logger.info(f"✅ Resume parsing completed successfully, type: {type(candidate_profile)}")
+                
+                # Yield control before file write
+                await asyncio.sleep(0)
                 
                 # Write resume parsing result to file
                 if response_file:
+                    logger.info("Writing resume parsing result to file...")
                     response_file.write(f"=== RESUME PARSING RESULT ===\n")
                     response_file.write(f"Time: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
                     response_file.write(f"{'='*60}\n\n")
@@ -4240,7 +4235,11 @@ Return ONLY valid JSON, no markdown formatting."""
                     response_file.write(f"\n\n")
                     response_file.flush()
                     os.fsync(response_file.fileno())  # Force OS-level flush for real-time writing
-                    logger.info("Resume parsing result written to file")
+                    logger.info("✅ Resume parsing result written to file")
+                
+                # Yield control before sending resume_parsed event
+                await asyncio.sleep(0)
+                logger.info("✅ About to yield resume_parsed event")
                 
             except Exception as parse_error:
                 logger.error(f"Error in resume parsing: {parse_error}", exc_info=True)
@@ -4306,12 +4305,6 @@ Return ONLY valid JSON, no markdown formatting."""
                     
                     logger.info(f"Job data extracted - title: {raw_job_title[:50] if raw_job_title else 'None'}, data length: {len(job_data) if job_data else 0}")
                     
-                    # Send progress event before job extraction
-                    yield format_sse_event("status", {
-                        "message": "Extracting job details..."
-                    })
-                    await asyncio.sleep(0)  # Force flush
-                    
                     from job_extractor import extract_company_and_title_from_raw_data
                     # Extract job info (this might take a moment)
                     logger.info("Calling extract_company_and_title_from_raw_data...")
@@ -4328,21 +4321,18 @@ Return ONLY valid JSON, no markdown formatting."""
                                 "gpt-4o-mini"
                             )
                         
-                        loop = asyncio.get_event_loop()
-                        extraction_task = loop.run_in_executor(None, extract_job_sync)
-                        
-                        # Monitor progress while waiting
-                        while not extraction_task.done():
-                            await asyncio.sleep(0.2)
-                            elapsed = time.time() - last_progress
-                            if elapsed >= 1.0:  # Update every second
-                                yield format_sse_event("status", {
-                                    "message": f"Extracting job details... ({int(time.time() - extraction_start)}s)"
-                                })
-                                await asyncio.sleep(0)  # Force flush
-                                last_progress = time.time()
-                        
-                        extracted_info = await extraction_task
+                        # Use asyncio.to_thread if available, otherwise use run_in_executor
+                        if hasattr(asyncio, 'to_thread'):
+                            extracted_info = await asyncio.wait_for(
+                                asyncio.to_thread(extract_job_sync),
+                                timeout=60.0  # 1 minute timeout
+                            )
+                        else:
+                            loop = asyncio.get_event_loop()
+                            extracted_info = await asyncio.wait_for(
+                                loop.run_in_executor(None, extract_job_sync),
+                                timeout=60.0  # 1 minute timeout
+                            )
                         logger.info(f"Job extraction complete: company={extracted_info.get('company_name')}, title={extracted_info.get('job_title')}")
                         
                         extracted_company = extracted_info.get("company_name")
@@ -4425,13 +4415,7 @@ Return ONLY valid JSON, no markdown formatting."""
             # Stream scoring for each job
             scored_jobs = []
             for idx, job in enumerate(jobs, 1):
-                # Event 5: Job scoring progress
-                logger.info(f"Yielding job_scoring event for job {idx}")
-                yield format_sse_event("status", {
-                    "message": f"Calculating match score for job {idx}..."
-                })
-                await asyncio.sleep(0)  # Force flush - CRITICAL for SSE
-                logger.info(f"job_scoring event yielded successfully for job {idx}")
+                logger.info(f"Scoring job {idx}: {job.job_title} at {job.company}")
                 
                 # Create scoring prompt
                 prompt = f"""
@@ -4729,15 +4713,10 @@ Return ONLY valid JSON (no markdown) with the following structure:
                 }
                 matched_jobs_list.append(matched_job)
             
-            # Event 7: Check sponsorship
+            # Check sponsorship
             sponsorship_info = None
             if jobs and jobs[0].company:
-                logger.info(f"Yielding sponsorship_checking event for company: {jobs[0].company}")
-                yield format_sse_event("status", {
-                    "message": f"Checking sponsorship for {jobs[0].company}..."
-                })
-                await asyncio.sleep(0)  # Force flush - CRITICAL for SSE
-                logger.info("sponsorship_checking event yielded successfully")
+                logger.info(f"Checking sponsorship for company: {jobs[0].company}")
                 from sponsorship_checker import check_sponsorship
                 cleaned_name = clean_company_name(jobs[0].company)
                 if cleaned_name:
@@ -4808,6 +4787,68 @@ Return ONLY valid JSON (no markdown) with the following structure:
             
             # Event 9: Summary generation (stream summaries if needed)
             # For now, summaries are already created, but we can stream them if needed
+            
+            # Save job applications to Firebase (background task)
+            if user_id and matched_jobs_list:
+                try:
+                    from job_extractor import extract_jobs_from_response
+                    api_response_format = {
+                        "matched_jobs": matched_jobs_list
+                    }
+                    jobs_to_save = extract_jobs_from_response(api_response_format)
+                    
+                    if jobs_to_save:
+                        logger.info(f"Scheduling background save of {len(jobs_to_save)} job applications")
+                        background_tasks.add_task(
+                            save_job_applications_background,
+                            user_id,
+                            jobs_to_save
+                        )
+                    else:
+                        logger.debug("No job applications to save")
+                except Exception as e:
+                    logger.error(f"Error preparing background save: {e}", exc_info=True)
+                    # Non-fatal - continue with response
+            
+            # Save sponsorship info to Firebase (background task)
+            if sponsorship_info and user_id:
+                try:
+                    sponsorship_dict = {
+                        "company_name": sponsorship_info.get("company_name"),
+                        "sponsors_workers": sponsorship_info.get("sponsors_workers", False),
+                        "visa_types": sponsorship_info.get("visa_types"),
+                        "summary": sponsorship_info.get("summary", "No sponsorship information available")
+                    }
+                    
+                    job_info = None
+                    if matched_jobs_list and len(matched_jobs_list) > 0:
+                        top_job = matched_jobs_list[0]
+                        portal = "Unknown"
+                        job_url_str = str(top_job.get("job_url", ""))
+                        if "linkedin.com" in job_url_str.lower():
+                            portal = "LinkedIn"
+                        elif "indeed.com" in job_url_str.lower():
+                            portal = "Indeed"
+                        elif "glassdoor.com" in job_url_str.lower():
+                            portal = "Glassdoor"
+                        
+                        job_info = {
+                            "job_title": top_job.get("job_title"),
+                            "job_url": job_url_str,
+                            "company": top_job.get("company"),
+                            "portal": portal
+                        }
+                    
+                    logger.info(f"Scheduling background save of sponsorship info for {sponsorship_dict.get('company_name')}")
+                    background_tasks.add_task(
+                        save_sponsorship_info_background,
+                        user_id,
+                        request_id,
+                        sponsorship_dict,
+                        job_info
+                    )
+                except Exception as e:
+                    logger.error(f"Error scheduling sponsorship save: {e}", exc_info=True)
             
             # Event 10: Complete
             processing_time = f"{time.time() - start_time:.1f}s"
