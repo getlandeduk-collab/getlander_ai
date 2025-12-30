@@ -331,7 +331,7 @@ def get_settings() -> Settings:
 
         firecrawl_api_key=os.getenv("FIRECRAWL_API_KEY"),
 
-        model_name=os.getenv("OPENAI_MODEL", "gpt-5-mini"),
+        model_name=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
 
         request_timeout_seconds=int(os.getenv("REQUEST_TIMEOUT_SECONDS", "120")),
 
@@ -1886,15 +1886,30 @@ async def get_progress(request_id: str):
 # Background task functions for Firebase saves
 def save_job_applications_background(user_id: str, jobs_to_save: List[Dict[str, Any]]):
     """Background task to save job applications to Firebase (non-blocking)."""
+    logger.info(f"[BACKGROUND TASK] Starting job applications save for user {user_id}, {len(jobs_to_save)} jobs")
     try:
+        if not user_id:
+            logger.error("[BACKGROUND TASK] user_id is empty, cannot save")
+            return
+        
+        if not jobs_to_save or len(jobs_to_save) == 0:
+            logger.warning("[BACKGROUND TASK] No jobs to save")
+            return
+        
+        logger.info(f"[BACKGROUND TASK] Importing firebase_service...")
         from firebase_service import get_firebase_service
+        logger.info(f"[BACKGROUND TASK] Getting firebase service instance...")
         firebase_service = get_firebase_service()
+        logger.info(f"[BACKGROUND TASK] Calling save_job_applications_batch with {len(jobs_to_save)} jobs...")
         saved_doc_ids = firebase_service.save_job_applications_batch(user_id, jobs_to_save)
-        logger.info(f"Background save completed: {len(saved_doc_ids)} job applications saved for user {user_id}")
+        logger.info(f"[BACKGROUND TASK] ✓ Save completed: {len(saved_doc_ids)} job applications saved for user {user_id}")
+        logger.info(f"[BACKGROUND TASK] Document IDs: {saved_doc_ids}")
     except ImportError as e:
-        logger.warning(f"Firebase service not available for background save: {e}")
+        logger.error(f"[BACKGROUND TASK] Firebase service not available: {e}", exc_info=True)
     except Exception as e:
-        logger.error(f"Background save failed for job applications: {e}", exc_info=True)
+        logger.error(f"[BACKGROUND TASK] Background save failed for job applications: {e}", exc_info=True)
+        import traceback
+        logger.error(f"[BACKGROUND TASK] Full traceback: {traceback.format_exc()}")
 
 
 def save_sponsorship_info_background(
@@ -1904,20 +1919,34 @@ def save_sponsorship_info_background(
     job_info: Optional[Dict[str, Any]] = None
 ):
     """Background task to save sponsorship info to Firebase (non-blocking)."""
+    logger.info(f"[BACKGROUND TASK] Starting sponsorship info save for user {user_id}, request {request_id}")
     try:
+        if not user_id:
+            logger.error("[BACKGROUND TASK] user_id is empty, cannot save sponsorship info")
+            return
+        
+        if not request_id:
+            logger.error("[BACKGROUND TASK] request_id is empty, cannot save sponsorship info")
+            return
+        
+        logger.info(f"[BACKGROUND TASK] Importing firebase_service...")
         from firebase_service import get_firebase_service
+        logger.info(f"[BACKGROUND TASK] Getting firebase service instance...")
         firebase_service = get_firebase_service()
+        logger.info(f"[BACKGROUND TASK] Calling save_sponsorship_info...")
         doc_id = firebase_service.save_sponsorship_info(
             user_id=user_id,
             request_id=request_id,
             sponsorship_data=sponsorship_data,
             job_info=job_info
         )
-        logger.info(f"Background save completed: sponsorship info saved with doc_id {doc_id} for user {user_id}")
+        logger.info(f"[BACKGROUND TASK] ✓ Save completed: sponsorship info saved with doc_id {doc_id} for user {user_id}")
     except ImportError as e:
-        logger.warning(f"Firebase service not available for background save: {e}")
+        logger.error(f"[BACKGROUND TASK] Firebase service not available: {e}", exc_info=True)
     except Exception as e:
-        logger.error(f"Background save failed for sponsorship info: {e}", exc_info=True)
+        logger.error(f"[BACKGROUND TASK] Background save failed for sponsorship info: {e}", exc_info=True)
+        import traceback
+        logger.error(f"[BACKGROUND TASK] Full traceback: {traceback.format_exc()}")
 
 
 @app.post("/api/match-jobs", response_model=MatchJobsResponse, dependencies=[Depends(rate_limit)])
@@ -3004,7 +3033,7 @@ async def match_jobs(
 
                 prompt = f"""
 
-Analyze the match between candidate and job. Consider ALL requirements from the job description.
+Analyze the match between candidate and job. Extract requirements ONLY from the job description provided below.
 
 Candidate Profile:
 
@@ -3019,6 +3048,13 @@ Job Details:
 - URL: {str(job.url)}
 
 - Description: {job.description[:2000]}
+
+CRITICAL REQUIREMENTS EXTRACTION RULES:
+
+1. **ONLY extract requirements that are EXPLICITLY mentioned in the job description text above.**
+2. **DO NOT include generic requirements for the role type** (e.g., don't assume "5+ years experience" if not mentioned, don't add common skills for the role if not listed).
+3. **DO NOT infer or add requirements** based on your knowledge of typical roles - only use what is actually stated in the job description.
+4. If the job description is brief or missing details, only extract what is explicitly mentioned.
 
 CRITICAL: Read the job description carefully. If this is a:
 
@@ -3055,34 +3091,37 @@ Return ONLY valid JSON (no markdown) with the following structure:
 
 IMPORTANT INSTRUCTIONS:
 
-1. **requirements_satisfied**: List ALL specific requirements/skills from the job that the candidate MATCHES.
+1. **requirements_satisfied**: List ALL specific requirements/skills from the EXTRACTED JOB DESCRIPTION that the candidate MATCHES.
+   - ONLY include requirements that are explicitly mentioned in the job description text above
    - Include the requirement name and brief context (e.g., "Java (candidate has 3 years experience)")
    - Be specific: "Java, Spring Boot" not just "Java"
-   - Include experience matches: "5+ years (candidate has 4 years)" if close
-   - Include technology matches: "React (candidate has strong frontend experience)"
-   - Include soft skills if mentioned: "Team leadership (candidate has managed teams)"
+   - Include experience matches: "5+ years (candidate has 4 years)" if close AND if "5+ years" is mentioned in the job description
+   - Include technology matches: "React (candidate has strong frontend experience)" ONLY if React is mentioned in the job description
+   - Include soft skills if mentioned: "Team leadership (candidate has managed teams)" ONLY if team leadership is mentioned in the job description
 
-2. **requirements_missing**: List ALL specific requirements/skills from the job that the candidate DOES NOT MATCH.
+2. **requirements_missing**: List ALL specific requirements/skills from the EXTRACTED JOB DESCRIPTION that the candidate DOES NOT MATCH.
+   - ONLY include requirements that are explicitly mentioned in the job description text above
    - Include the requirement name and why it's missing (e.g., "Kubernetes (not mentioned in candidate profile)")
    - Be specific about what's missing
-   - Include experience gaps: "5+ years experience (candidate has 3 years)"
-   - Include missing technologies, tools, certifications, etc.
+   - Include experience gaps: "5+ years experience (candidate has 3 years)" ONLY if "5+ years" is mentioned in the job description
+   - Include missing technologies, tools, certifications, etc. ONLY if they are mentioned in the job description
 
 3. **improvements_needed**: List SPECIFIC, ACTIONABLE improvements the candidate should work on.
-   - Focus on the most important missing requirements
+   - Focus on the most important missing requirements FROM THE JOB DESCRIPTION
    - Be specific: "Learn Docker and Kubernetes" not just "Learn containerization"
-   - Include experience gaps: "Gain 2 more years of experience"
+   - Include experience gaps: "Gain 2 more years of experience" ONLY if a specific experience requirement is mentioned in the job description
    - Prioritize improvements that would have the biggest impact on match score
    - Keep it practical and achievable
 
 4. **requirements_met** and **total_requirements**: Count the number of requirements satisfied vs total requirements.
-   - Count each distinct requirement (skill, tool, experience level, certification, etc.)
+   - Count ONLY requirements that are explicitly mentioned in the job description
+   - Count each distinct requirement (skill, tool, experience level, certification, etc.) that appears in the job description
    - Be generous but accurate - count related skills as matches if the candidate has similar experience
 
 5. **match_score**: Calculate based on:
-   - Percentage of requirements satisfied
-   - Importance of satisfied/missing requirements
-   - Experience level match
+   - Percentage of requirements satisfied (from the job description)
+   - Importance of satisfied/missing requirements (from the job description)
+   - Experience level match (if mentioned in job description)
    - Overall fit quality
 
 Be strict with scoring:
@@ -4093,8 +4132,18 @@ CRITICAL EXTRACTION RULES:
    - If no such section exists, return empty array: []
 
 5. **skills**: 
-   - Extract ALL technologies, tools, frameworks mentioned anywhere in the resume
-   - Include programming languages, libraries, frameworks, tools
+   - Extract ALL technologies, tools, frameworks, libraries mentioned ANYWHERE in the resume
+   - Include programming languages (Python, Java, C++, JavaScript, etc.)
+   - Include libraries (numpy, pandas, scikit-learn, TensorFlow, PyTorch, React, Angular, etc.)
+   - Include frameworks (Django, Flask, FastAPI, Spring Boot, Express.js, etc.)
+   - Include tools (Docker, Kubernetes, Git, Jenkins, AWS, Azure, etc.)
+   - Include databases (PostgreSQL, MySQL, MongoDB, Redis, etc.)
+   - Include cloud platforms (AWS, Azure, GCP, etc.)
+   - Include methodologies (Agile, Scrum, DevOps, etc.)
+   - Check ALL sections: Skills section, Experience descriptions, Project descriptions, Education coursework, Certifications
+   - Extract from experience_summary text if technologies are mentioned there
+   - Be COMPREHENSIVE - don't miss any technology mentioned anywhere
+   - Return as a complete array with ALL skills found
 
 OUTPUT FORMAT (valid JSON only, no markdown):
 {{
@@ -4117,88 +4166,73 @@ REMEMBER:
 
 Return ONLY valid JSON, no markdown formatting."""
                 
-                # Parse resume with LLM (non-streaming for reliability)
+                # Parse resume with LLM (with retry logic and optimized for speed)
                 logger.info("Calling LLM for resume parsing...")
                 
-                # No status update - resume_parsed event will be sent when complete
+                def call_llm_sync_with_retry(max_retries=3, initial_delay=1.0):
+                    """Call OpenAI API synchronously with retry logic"""
+                    for attempt in range(max_retries):
+                        try:
+                            logger.info(f"Making OpenAI API call (attempt {attempt + 1}/{max_retries})...")
+                            response = client.chat.completions.create(
+                                model=model_name,
+                                messages=[{"role": "user", "content": resume_prompt}],
+                                response_format={"type": "json_object"} if "gpt-4" in model_name.lower() or ("o1" in model_name.lower() and "gpt-5" not in model_name.lower()) else None,
+                                timeout=30.0  # 30 second timeout per request
+                            )
+                            logger.info("OpenAI API call completed")
+                            if not response or not response.choices or len(response.choices) == 0:
+                                logger.error("Empty response from OpenAI API")
+                                raise Exception("Empty response from OpenAI API")
+                            if not response.choices[0].message or not response.choices[0].message.content:
+                                logger.error("No content in OpenAI response")
+                                raise Exception("No content in OpenAI response")
+                            response_text = response.choices[0].message.content.strip()
+                            logger.info(f"Response received, length: {len(response_text)}")
+                            if not response_text:
+                                logger.error("Empty response text after stripping")
+                                raise Exception("Empty response text")
+                            return response_text
+                        except Exception as e:
+                            if attempt < max_retries - 1:
+                                delay = initial_delay * (2 ** attempt)  # Exponential backoff
+                                logger.warning(f"OpenAI API call failed (attempt {attempt + 1}/{max_retries}): {e}. Retrying in {delay}s...")
+                                import time
+                                time.sleep(delay)
+                            else:
+                                logger.error(f"OpenAI API call failed after {max_retries} attempts: {e}", exc_info=True)
+                                raise
                 
-                def call_llm_sync():
-                    """Call OpenAI API synchronously"""
-                    try:
-                        logger.info("Making OpenAI API call...")
-                        response = client.chat.completions.create(
-                            model=model_name,
-                            messages=[{"role": "user", "content": resume_prompt}],
-                            response_format={"type": "json_object"} if "gpt-4" in model_name.lower() or ("o1" in model_name.lower() and "gpt-5" not in model_name.lower()) else None
-                        )
-                        logger.info("OpenAI API call completed")
-                        if not response or not response.choices or len(response.choices) == 0:
-                            logger.error("Empty response from OpenAI API")
-                            raise Exception("Empty response from OpenAI API")
-                        if not response.choices[0].message or not response.choices[0].message.content:
-                            logger.error("No content in OpenAI response")
-                            raise Exception("No content in OpenAI response")
-                        response_text = response.choices[0].message.content.strip()
-                        logger.info(f"Response received, length: {len(response_text)}")
-                        if not response_text:
-                            logger.error("Empty response text after stripping")
-                            raise Exception("Empty response text")
-                        return response_text
-                    except Exception as e:
-                        logger.error(f"Error in OpenAI API call: {e}", exc_info=True)
-                        import traceback
-                        logger.error(f"Traceback in call_llm_sync: {traceback.format_exc()}")
-                        raise
-                
-                # Run LLM call in thread
+                # Run LLM call in thread with shorter timeout
                 logger.info("Starting LLM call in background thread...")
+                full_response = None
                 try:
                     # Use asyncio.to_thread if available (Python 3.9+), otherwise use run_in_executor
                     if hasattr(asyncio, 'to_thread'):
                         logger.info("Using asyncio.to_thread...")
                         full_response = await asyncio.wait_for(
-                            asyncio.to_thread(call_llm_sync),
-                            timeout=120.0  # 2 minute timeout
+                            asyncio.to_thread(call_llm_sync_with_retry),
+                            timeout=60.0  # 1 minute timeout (reduced from 2 minutes)
                         )
                     else:
                         logger.info("Using run_in_executor (Python < 3.9)...")
                         loop = asyncio.get_event_loop()
                         full_response = await asyncio.wait_for(
-                            loop.run_in_executor(None, call_llm_sync),
-                            timeout=120.0  # 2 minute timeout
+                            loop.run_in_executor(None, call_llm_sync_with_retry),
+                            timeout=60.0  # 1 minute timeout
                         )
                     logger.info(f"✅ LLM response received, total length: {len(full_response)}")
                     if not full_response or len(full_response) == 0:
                         logger.error("Empty response from LLM")
                         raise Exception("Empty response from LLM")
-                    logger.info(f"LLM response preview: {full_response[:200]}...")
-                    
-                    # Yield control to event loop before file operations
-                    await asyncio.sleep(0)
-                    logger.info("✅ Event loop yielded after LLM response")
-                    
-                    # Write raw LLM response to file
-                    if response_file:
-                        logger.info("Writing LLM response to file...")
-                        response_file.write(f"=== RAW LLM RESPONSE (Resume Parsing) ===\n")
-                        response_file.write(f"Time: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
-                        response_file.write(f"Length: {len(full_response)} characters\n")
-                        response_file.write(f"{'='*60}\n\n")
-                        response_file.write(full_response)
-                        response_file.write(f"\n\n")
-                        response_file.flush()
-                        os.fsync(response_file.fileno())  # Force OS-level flush for real-time writing
-                        logger.info("✅ Raw LLM response written to file")
                 except asyncio.TimeoutError:
-                    logger.error("LLM call timed out")
+                    logger.error("LLM call timed out after 60 seconds")
                     raise Exception("Resume parsing timed out")
                 except Exception as llm_error:
                     logger.error(f"Error getting LLM response: {llm_error}", exc_info=True)
-                    import traceback
-                    logger.error(f"Traceback: {traceback.format_exc()}")
                     raise llm_error
                 
-                # Parse the JSON response
+                # Parse the JSON response IMMEDIATELY (before any file operations)
                 logger.info(f"✅ Starting JSON parsing, response length: {len(full_response)}")
                 await asyncio.sleep(0)  # Yield before parsing
                 
@@ -4220,53 +4254,21 @@ Return ONLY valid JSON, no markdown formatting."""
                         "interests": []
                     }
                 
-                logger.info(f"✅ Resume parsing completed successfully, type: {type(candidate_profile)}")
+                logger.info(f"✅ Resume parsing completed successfully")
                 
-                # Yield control before file write
-                await asyncio.sleep(0)
+                # Ensure candidate_profile is a dict BEFORE sending event
+                if not isinstance(candidate_profile, dict):
+                    logger.warning(f"candidate_profile is not a dict, type: {type(candidate_profile)}, converting...")
+                    if hasattr(candidate_profile, 'dict'):
+                        candidate_profile = candidate_profile.dict()
+                    elif hasattr(candidate_profile, '__dict__'):
+                        candidate_profile = candidate_profile.__dict__
+                    else:
+                        candidate_profile = {"name": "Unknown", "skills": [], "total_years_experience": 0}
+                        logger.error("Could not convert candidate_profile to dict, using defaults")
                 
-                # Write resume parsing result to file
-                if response_file:
-                    logger.info("Writing resume parsing result to file...")
-                    response_file.write(f"=== RESUME PARSING RESULT ===\n")
-                    response_file.write(f"Time: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
-                    response_file.write(f"{'='*60}\n\n")
-                    response_file.write(json.dumps(candidate_profile, indent=2, ensure_ascii=False))
-                    response_file.write(f"\n\n")
-                    response_file.flush()
-                    os.fsync(response_file.fileno())  # Force OS-level flush for real-time writing
-                    logger.info("✅ Resume parsing result written to file")
-                
-                # Yield control before sending resume_parsed event
-                await asyncio.sleep(0)
-                logger.info("✅ About to yield resume_parsed event")
-                
-            except Exception as parse_error:
-                logger.error(f"Error in resume parsing: {parse_error}", exc_info=True)
-                yield format_sse_event("error", {
-                    "message": f"Resume parsing failed: {str(parse_error)}"
-                })
-                await asyncio.sleep(0)  # Force flush
-                return
-            
-            # Ensure candidate_profile is a dict
-            logger.info("Converting candidate_profile to dict if needed...")
-            if not isinstance(candidate_profile, dict):
-                logger.warning(f"candidate_profile is not a dict, type: {type(candidate_profile)}, converting...")
-                if hasattr(candidate_profile, 'dict'):
-                    candidate_profile = candidate_profile.dict()
-                elif hasattr(candidate_profile, '__dict__'):
-                    candidate_profile = candidate_profile.__dict__
-                else:
-                    candidate_profile = {"name": "Unknown", "skills": [], "total_years_experience": 0}
-                    logger.error("Could not convert candidate_profile to dict, using defaults")
-            
-            logger.info(f"Preparing resume_parsed event. Profile keys: {list(candidate_profile.keys())[:10]}")
-            
-            # Event 3: Resume parsed - SEND IMMEDIATELY with full candidate profile
-            try:
-                logger.info(f"Yielding resume_parsed event with full candidate profile: name={candidate_profile.get('name')}")
-                # Stream complete candidate profile data
+                # SEND resume_parsed event IMMEDIATELY (before file operations)
+                logger.info(f"Yielding resume_parsed event IMMEDIATELY with full candidate profile: name={candidate_profile.get('name')}")
                 yield format_sse_event("resume_parsed", {
                     "candidate_profile": {
                         "name": candidate_profile.get("name"),
@@ -4282,11 +4284,41 @@ Return ONLY valid JSON, no markdown formatting."""
                     }
                 })
                 await asyncio.sleep(0)  # Force flush - CRITICAL for SSE
-                logger.info("resume_parsed event with full candidate profile yielded and flushed - continuing to job extraction")
-            except Exception as resume_event_error:
-                logger.error(f"Error yielding resume_parsed event: {resume_event_error}", exc_info=True)
+                logger.info("✅ resume_parsed event sent and flushed - continuing to file writes")
+                
+                # NOW do file writes in background (non-blocking)
+                async def write_resume_parsing_to_file():
+                    """Write resume parsing results to file asynchronously"""
+                    try:
+                        if response_file:
+                            logger.info("Writing LLM response and parsing result to file...")
+                            response_file.write(f"=== RAW LLM RESPONSE (Resume Parsing) ===\n")
+                            response_file.write(f"Time: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+                            response_file.write(f"Length: {len(full_response)} characters\n")
+                            response_file.write(f"{'='*60}\n\n")
+                            response_file.write(full_response)
+                            response_file.write(f"\n\n")
+                            response_file.write(f"=== RESUME PARSING RESULT ===\n")
+                            response_file.write(f"Time: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+                            response_file.write(f"{'='*60}\n\n")
+                            response_file.write(json.dumps(candidate_profile, indent=2, ensure_ascii=False))
+                            response_file.write(f"\n\n")
+                            response_file.flush()
+                            os.fsync(response_file.fileno())
+                            logger.info("✅ Resume parsing results written to file")
+                    except Exception as file_error:
+                        logger.error(f"Error writing resume parsing to file: {file_error}", exc_info=True)
+                
+                # Start file write in background (don't await - non-blocking)
+                asyncio.create_task(write_resume_parsing_to_file())
+                logger.info("✅ File write task started in background")
+                
+            except Exception as parse_error:
+                logger.error(f"Error in resume parsing: {parse_error}", exc_info=True)
+                import traceback
+                logger.error(f"Full traceback: {traceback.format_exc()}")
                 yield format_sse_event("error", {
-                    "message": f"Failed to send resume parsed event: {str(resume_event_error)}"
+                    "message": f"Resume parsing failed: {str(parse_error)}"
                 })
                 await asyncio.sleep(0)  # Force flush
                 return
@@ -4417,9 +4449,12 @@ Return ONLY valid JSON, no markdown formatting."""
             for idx, job in enumerate(jobs, 1):
                 logger.info(f"Scoring job {idx}: {job.job_title} at {job.company}")
                 
-                # Create scoring prompt
+                # Create scoring prompt with better handling of sparse descriptions
+                job_description_text = (job.description or "")[:3000]  # Increased to 3000 chars
+                description_length = len(job_description_text)
+                
                 prompt = f"""
-Analyze the match between candidate and job. Consider ALL requirements from the job description.
+Analyze the match between candidate and job. Extract ALL requirements, skills, qualifications, and competencies from the job description, job title, and any available information. This analysis must work for ALL domains (Technology, Healthcare, Finance, Marketing, Sales, Engineering, Design, Education, Legal, etc.).
 
 Candidate Profile:
 {json.dumps(candidate_profile, indent=2)}
@@ -4428,19 +4463,117 @@ Job Details:
 - Title: {job.job_title}
 - Company: {job.company}
 - URL: {str(job.url)}
-- Description: {job.description[:2000]}
+- Description: {job_description_text}
+- Description Length: {description_length} characters
+
+CRITICAL REQUIREMENTS EXTRACTION RULES (DOMAIN-AGNOSTIC):
+
+1. **Extract requirements from ALL available sources with SPECIFIC details:**
+   - Job title - extract domain, role type, level (e.g., "Senior Data Analyst", "Marketing Manager", "Registered Nurse")
+   - Job description text - extract SPECIFIC requirements mentioned
+   - Company name and industry context
+   - Any keywords, qualifications, or competencies mentioned
+
+2. **BE SPECIFIC - NO GENERIC TERMS (WORKS FOR ALL DOMAINS):**
+   
+   **For Technical Roles:**
+   - If job mentions "Python libraries", extract SPECIFIC names: "numpy", "pandas", "scikit-learn", "TensorFlow"
+   - If job mentions "frameworks", extract SPECIFIC names: "React", "Django", "Spring Boot", "Angular"
+   - If job mentions "tools", extract SPECIFIC names: "Docker", "Kubernetes", "Git", "Jenkins", "AWS"
+   - If job mentions "databases", extract SPECIFIC names: "PostgreSQL", "MySQL", "MongoDB", "Redis"
+   
+   **For Healthcare Roles:**
+   - If job mentions "certifications", extract SPECIFIC names: "RN license", "BLS certification", "ACLS certification"
+   - If job mentions "specialties", extract SPECIFIC areas: "Cardiology", "Pediatrics", "Emergency Medicine"
+   - If job mentions "software", extract SPECIFIC systems: "Epic", "Cerner", "Meditech"
+   
+   **For Finance/Accounting Roles:**
+   - If job mentions "software", extract SPECIFIC tools: "QuickBooks", "SAP", "Oracle Financials", "Excel"
+   - If job mentions "certifications", extract SPECIFIC credentials: "CPA", "CFA", "CMA"
+   - If job mentions "standards", extract SPECIFIC frameworks: "GAAP", "IFRS", "SOX compliance"
+   
+   **For Marketing/Sales Roles:**
+   - If job mentions "platforms", extract SPECIFIC tools: "HubSpot", "Salesforce", "Google Analytics", "Facebook Ads"
+   - If job mentions "channels", extract SPECIFIC methods: "Email marketing", "Social media", "SEO", "PPC"
+   - If job mentions "metrics", extract SPECIFIC KPIs: "ROI", "Conversion rate", "Customer acquisition cost"
+   
+   **For Design/Creative Roles:**
+   - If job mentions "software", extract SPECIFIC tools: "Adobe Photoshop", "Figma", "Sketch", "Illustrator"
+   - If job mentions "skills", extract SPECIFIC abilities: "UI/UX design", "Brand identity", "Typography"
+   
+   **For Education Roles:**
+   - If job mentions "certifications", extract SPECIFIC credentials: "Teaching license", "State certification"
+   - If job mentions "subjects", extract SPECIFIC areas: "Mathematics", "Science", "English Literature"
+   - If job mentions "methods", extract SPECIFIC approaches: "Montessori", "IB curriculum", "STEM education"
+   
+   **For Legal Roles:**
+   - If job mentions "areas of law", extract SPECIFIC specialties: "Corporate law", "Intellectual property", "Employment law"
+   - If job mentions "software", extract SPECIFIC tools: "Westlaw", "LexisNexis", "Case management systems"
+   
+   **For ANY Domain:**
+   - Extract SPECIFIC degrees required: "Bachelor's in Computer Science", "Master's in Business Administration"
+   - Extract SPECIFIC years of experience: "3+ years", "5-7 years", "Entry-level"
+   - Extract SPECIFIC soft skills: "Leadership", "Communication", "Project management", "Team collaboration"
+   - Extract SPECIFIC industry knowledge: "Healthcare regulations", "Financial markets", "Retail operations"
+   - DO NOT use generic terms - always extract the SPECIFIC name, tool, certification, or requirement
+
+3. **Extract ALL candidate skills, qualifications, and experience from profile:**
+   - Review candidate's skills array COMPLETELY - include ALL skills mentioned (technical, soft skills, domain-specific)
+   - Review candidate's experience_summary for additional skills, tools, technologies, methodologies
+   - Review candidate's education for relevant degrees, coursework, specializations
+   - Review candidate's certifications for specific credentials, licenses, certifications
+   - Review candidate's projects/interests for relevant skills and experience
+   - Extract domain-specific knowledge, industry experience, and competencies
+
+4. **Match candidate against extracted requirements with SPECIFIC comparisons:**
+   - For each requirement extracted from job, check if candidate has the EXACT match
+   - Technical: "numpy (candidate lists numpy as a skill)" or "numpy (not mentioned in candidate profile)"
+   - Healthcare: "RN license (candidate has RN license)" or "BLS certification (not mentioned in candidate profile)"
+   - Finance: "CPA certification (candidate has CPA)" or "QuickBooks (not mentioned in candidate profile)"
+   - Marketing: "HubSpot (candidate has HubSpot experience)" or "Google Analytics (not mentioned in candidate profile)"
+   - Education: "Teaching license (candidate has teaching license)" or "IB curriculum experience (not mentioned in candidate profile)"
+   - Be SPECIFIC about what candidate has vs. what's missing for EVERY requirement
+
+5. **For sparse descriptions, extract from job title and any available text:**
+   - Analyze job title for domain, role level, and implied requirements
+   - Extract any technologies, tools, qualifications, or skills mentioned in description
+   - Extract education requirements, experience levels, certifications mentioned
+   - Extract soft skills, competencies, or industry knowledge mentioned
+
+6. **DO NOT add generic requirements** that are NOT mentioned in title or description:
+   - Only extract what is actually stated or clearly implied from the job title/description
+   - Example: "Marketing Manager" implies marketing experience, but NOT "10+ years" unless stated
 
 Return ONLY valid JSON (no markdown) with the following structure:
 {{
   "match_score": 0.75,
-  "key_matches": ["skill1", "skill2"],
+  "key_matches": ["Specific skill 1", "Specific skill 2", "Specific qualification"],
   "requirements_met": 5,
   "total_requirements": 8,
-  "requirements_satisfied": ["Java (candidate has 3 years experience)"],
-  "requirements_missing": ["Kubernetes (not mentioned in candidate profile)"],
-  "improvements_needed": ["Learn Docker and Kubernetes"],
-  "reasoning": "Brief explanation of score"
+  "requirements_satisfied": [
+    "Specific requirement 1 (candidate has [specific evidence])",
+    "Specific requirement 2 (candidate [specific match])"
+  ],
+  "requirements_missing": [
+    "Specific requirement 3 (not mentioned in candidate profile)",
+    "Specific requirement 4 (candidate lacks [specific item])"
+  ],
+  "improvements_needed": [
+    "Obtain [specific certification/tool/skill] - [specific reason]",
+    "Gain experience with [specific tool/technology] for [specific purpose]"
+  ],
+  "reasoning": "Brief explanation of score based on extracted requirements"
 }}
+
+IMPORTANT (WORKS FOR ALL DOMAINS): 
+- **ALWAYS extract at least SOME requirements** from the job title and description, even if sparse
+- **BE SPECIFIC** - use exact names of tools, certifications, software, qualifications, not generic terms
+- **requirements_satisfied** and **requirements_missing** must list SPECIFIC items with exact names
+- **improvements_needed** must mention SPECIFIC items to obtain/learn, not generic suggestions
+- Extract ALL candidate skills, qualifications, and experience from the profile - don't miss any
+- **match_score** should reflect how well candidate matches the extracted requirements (not 0.0% unless there's a clear mismatch)
+- For internships/entry-level roles, be more lenient with experience requirements
+- Work across ALL domains: Technology, Healthcare, Finance, Marketing, Sales, Engineering, Design, Education, Legal, etc.
 """
                 
                 # Stream the scoring response using a simpler, more direct approach
@@ -4583,6 +4716,50 @@ Return ONLY valid JSON (no markdown) with the following structure:
                 requirements_missing_list = data_result.get("requirements_missing", []) or []
                 requirements_met = int(data_result.get("requirements_met", 0))
                 total_requirements = int(data_result.get("total_requirements", 0))
+                
+                # Fallback: If no requirements extracted, extract from job title
+                if total_requirements == 0 and len(requirements_satisfied_list) == 0 and len(requirements_missing_list) == 0:
+                    logger.warning(f"No requirements extracted for job {idx}, extracting from job title as fallback")
+                    job_title_lower = (job.job_title or "").lower()
+                    candidate_skills_lower = [s.lower() for s in (candidate_profile.get("skills", []) or [])]
+                    
+                    # Extract requirements from job title
+                    title_requirements = []
+                    if "ai" in job_title_lower or "artificial intelligence" in job_title_lower:
+                        title_requirements.append("AI/ML interest or experience")
+                    if "machine learning" in job_title_lower or "ml" in job_title_lower:
+                        title_requirements.append("Machine Learning knowledge")
+                    if "research" in job_title_lower:
+                        title_requirements.append("Research experience or interest")
+                    if "internship" in job_title_lower or "intern" in job_title_lower:
+                        title_requirements.append("Entry-level/Student role")
+                    if "developer" in job_title_lower or "engineer" in job_title_lower:
+                        title_requirements.append("Software development skills")
+                    if "data" in job_title_lower:
+                        title_requirements.append("Data analysis skills")
+                    
+                    # Match candidate against title requirements
+                    for req in title_requirements:
+                        req_lower = req.lower()
+                        matched = False
+                        for skill in candidate_skills_lower:
+                            if any(keyword in skill for keyword in req_lower.split() if len(keyword) > 3):
+                                matched = True
+                                break
+                        
+                        if matched:
+                            requirements_satisfied_list.append(f"{req} (candidate has relevant skills)")
+                        else:
+                            requirements_missing_list.append(f"{req} (not explicitly mentioned in candidate profile)")
+                    
+                    # Update counts
+                    total_requirements = len(requirements_satisfied_list) + len(requirements_missing_list)
+                    requirements_met = len(requirements_satisfied_list)
+                    
+                    # Adjust score if it's 0.0 but we found some matches
+                    if score == 0.0 and len(requirements_satisfied_list) > 0:
+                        score = max(0.3, len(requirements_satisfied_list) / max(total_requirements, 1))
+                        logger.info(f"Adjusted score from 0.0 to {score:.1%} based on title-based requirements")
                 
                 if total_requirements == 0:
                     total_requirements = len(requirements_satisfied_list) + len(requirements_missing_list)
@@ -4791,28 +4968,37 @@ Return ONLY valid JSON (no markdown) with the following structure:
             # Save job applications to Firebase (background task)
             if user_id and matched_jobs_list:
                 try:
+                    logger.info(f"[STREAM] Preparing to save {len(matched_jobs_list)} jobs to Firebase for user {user_id}")
                     from job_extractor import extract_jobs_from_response
                     api_response_format = {
                         "matched_jobs": matched_jobs_list
                     }
+                    logger.info(f"[STREAM] Extracting jobs from response format...")
                     jobs_to_save = extract_jobs_from_response(api_response_format)
+                    logger.info(f"[STREAM] Extracted {len(jobs_to_save)} jobs to save")
                     
                     if jobs_to_save:
-                        logger.info(f"Scheduling background save of {len(jobs_to_save)} job applications")
+                        logger.info(f"[STREAM] Scheduling background save of {len(jobs_to_save)} job applications for user {user_id}")
+                        logger.info(f"[STREAM] First job sample: {jobs_to_save[0] if jobs_to_save else 'N/A'}")
+                        # Use BackgroundTasks only (removed duplicate asyncio.create_task to prevent double saves)
                         background_tasks.add_task(
                             save_job_applications_background,
                             user_id,
                             jobs_to_save
                         )
+                        logger.info(f"[STREAM] ✓ Background task scheduled successfully")
                     else:
-                        logger.debug("No job applications to save")
+                        logger.warning(f"[STREAM] No job applications extracted to save (matched_jobs_list had {len(matched_jobs_list)} jobs)")
                 except Exception as e:
-                    logger.error(f"Error preparing background save: {e}", exc_info=True)
+                    logger.error(f"[STREAM] Error preparing background save: {e}", exc_info=True)
+                    import traceback
+                    logger.error(f"[STREAM] Full traceback: {traceback.format_exc()}")
                     # Non-fatal - continue with response
             
             # Save sponsorship info to Firebase (background task)
             if sponsorship_info and user_id:
                 try:
+                    logger.info(f"[STREAM] Preparing to save sponsorship info to Firebase for user {user_id}")
                     sponsorship_dict = {
                         "company_name": sponsorship_info.get("company_name"),
                         "sponsors_workers": sponsorship_info.get("sponsors_workers", False),
@@ -4839,7 +5025,9 @@ Return ONLY valid JSON (no markdown) with the following structure:
                             "portal": portal
                         }
                     
-                    logger.info(f"Scheduling background save of sponsorship info for {sponsorship_dict.get('company_name')}")
+                    logger.info(f"[STREAM] Scheduling background save of sponsorship info for {sponsorship_dict.get('company_name')}")
+                    logger.info(f"[STREAM] Sponsorship data: {sponsorship_dict}")
+                    # Use BackgroundTasks only (removed duplicate asyncio.create_task to prevent double saves)
                     background_tasks.add_task(
                         save_sponsorship_info_background,
                         user_id,
@@ -4847,8 +5035,11 @@ Return ONLY valid JSON (no markdown) with the following structure:
                         sponsorship_dict,
                         job_info
                     )
+                    logger.info(f"[STREAM] ✓ Sponsorship background task scheduled successfully")
                 except Exception as e:
-                    logger.error(f"Error scheduling sponsorship save: {e}", exc_info=True)
+                    logger.error(f"[STREAM] Error scheduling sponsorship save: {e}", exc_info=True)
+                    import traceback
+                    logger.error(f"[STREAM] Full traceback: {traceback.format_exc()}")
             
             # Event 10: Complete
             processing_time = f"{time.time() - start_time:.1f}s"
