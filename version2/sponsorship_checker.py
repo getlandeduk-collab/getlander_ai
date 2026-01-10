@@ -464,6 +464,12 @@ def select_correct_company_match(
         logger.debug("Only one candidate match found, using it directly")
         return candidate_matches[0]
     
+    # If top match has very high score (>95%), skip AI agent for faster response
+    top_match_score = candidate_matches[0].get('max_score', candidate_matches[0].get('match_score', 0))
+    if top_match_score >= 95:
+        logger.debug(f"Top match has very high score ({top_match_score}%), skipping AI agent for faster response")
+        return candidate_matches[0]
+    
     try:
         from agents import Agent, get_model_config
         
